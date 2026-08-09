@@ -29,6 +29,18 @@ export DATABASE_URL=postgres://zakupki:zakupki@localhost:5432/zakupki_search?ssl
 go run ./cmd/search
 ```
 
+## Swagger / OpenAPI
+
+Для других сервисов контракт лежит в `docs/openapi.yaml`.
+
+| URL | Что |
+|-----|-----|
+| http://localhost:8091/swagger/ | Swagger UI |
+| http://localhost:8091/openapi.yaml | Сырой OpenAPI 3.0 |
+| http://localhost:8091/docs | редирект на `/swagger/` |
+
+В UI можно вызвать `Authorize` и вставить Bearer token после login.
+
 ## API
 
 | Method | Path | Auth | Описание |
@@ -45,6 +57,12 @@ go run ./cmd/search
 | GET | `/api/v1/search-profiles/{id}/eis-url` | Bearer | URL/query для ЕИС |
 
 Токен: заголовок `Authorization: Bearer <token>` или cookie `session`.
+
+### Интеграция с parser / platform
+
+1. Взять профиль: `GET /api/v1/search-profiles/{id}` или готовый URL: `.../eis-url`
+2. Воркер обходит ленту ЕИС (ещё не в этом сервисе)
+3. Handoff в parser — batch с полями `reg_number` (+ `notice_url`, `law`, `notice_guid`); схема `ParserHandoffItem` описана в OpenAPI как целевой контракт
 
 ### Пример
 

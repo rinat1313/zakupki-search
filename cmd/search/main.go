@@ -49,7 +49,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("zakupki-search listening on %s", cfg.HTTPAddr)
+		log.Printf("zakupki-search listening on %s; swagger UI at /swagger/", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}

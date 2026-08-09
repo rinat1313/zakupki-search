@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rinat1313/zakupki-search/docs"
 	"github.com/rinat1313/zakupki-search/internal/config"
 	"github.com/rinat1313/zakupki-search/internal/db"
 	"github.com/rinat1313/zakupki-search/internal/models"
@@ -31,6 +32,8 @@ func New(store *db.Store, cfg config.Config) *Server {
 }
 
 func (s *Server) routes() {
+	docs.Mount(s.Mux)
+
 	s.Mux.HandleFunc("GET /health", s.handleHealth)
 
 	s.Mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)

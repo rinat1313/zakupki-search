@@ -1,0 +1,607 @@
+openapi: 3.0.3
+info:
+  title: zakupki-search API
+  description: |
+    Сервис хранения пользовательских **поисковых настроек ЕИС** и подготовки параметров поиска закупок.
+
+    ## Роль в стеке
+    - UI / gateway: логин пользователя → CRUD профилей поиска
+    - `zakupki-search`: хранит named-профили с `eis_config` (JSONB) в PostgreSQL
+    - worker (следующий шаг): по профилю ходит в ЕИС `extendedsearch/results.html`
+    - `zakupki-parser` / platform ingest: получает batch `reg_number` (+ `notice_url`, `law`)
+
+    ## Как работать другим сервисам
+    1. `POST /api/v1/auth/login` → получить `token`
+    2. Все защищённые методы: заголовок `Authorization: Bearer <token>`
+    3. `GET /api/v1/search-profiles` — список настроек пользователя
+    4. `GET /api/v1/search-profiles/{id}` — полный `eis_config`
+    5. `GET /api/v1/search-profiles/{id}/eis-url` — готовый URL/query для ЕИС
+       (удобно для воркера без собственной сборки query)
+
+    Сейчас сервис **не парсит ленту ЕИС** и не шлёт данные в parser — только auth + хранение конфигов + сборка URL.
+
+    Демо-пользователь (миграции): `demo` / `demo`.
+  version: 0.1.0
+  contact:
+    name: zakupki-platform
+    url: https://github.com/rinat1313/zakupki-search
+
+servers:
+  - url: http://localhost:8091
+    description: Local development
+  - url: http://search:8091
+    description: Docker compose service name
+
+tags:
+  - name: health
+    description: Проверка доступности
+  - name: auth
+    description: Логин / сессии
+  - name: search-profiles
+    description: Именованные поисковые настройки пользователя (ЕИС)
+  - name: integration
+    description: Подсказки для parser / platform (контракт handoff)
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Сервис доступен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                service: zakupki-search
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Логин
+      description: |
+        Возвращает opaque session token. Также выставляет cookie `session` (HttpOnly).
+        Для service-to-service удобнее Bearer token из тела ответа.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            example:
+              login: demo
+              password: demo
+      responses:
+        "200":
+          description: Успешный вход
+          headers:
+            Set-Cookie:
+              description: HttpOnly cookie `session=<token>`
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Выход
+      operationId: logout
+      responses:
+        "200":
+          description: Сессия удалена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Текущий пользователь
+      operationId: getMe
+      responses:
+        "200":
+          description: Профиль
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/search-profiles:
+    get:
+      tags: [search-profiles]
+      summary: Список поисковых настроек
+      description: Возвращает все профили текущего пользователя (новые сверху).
+      operationId: listSearchProfiles
+      responses:
+        "200":
+          description: Список
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchProfileList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [search-profiles]
+      summary: Создать поисковую настройку
+      description: |
+        `name` уникален в рамках пользователя.
+        Если `eis_config` не передан — подставляется default (44+223, этапы af/ca, sort UPDATE_DATE).
+      operationId: createSearchProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchProfileWrite"
+            example:
+              name: ПО и разработка
+              description: Мониторинг 44/223, подача заявок
+              source: eis
+              enabled: true
+              eis_config:
+                search_string: Разработка ПО
+                morphology: true
+                fz44: true
+                fz223: true
+                stage_af: true
+                stage_ca: true
+                stage_pc: false
+                stage_pa: false
+                sort_by: UPDATE_DATE
+                records_per_page: "_10"
+      responses:
+        "201":
+          description: Создано
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/search-profiles/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      tags: [search-profiles]
+      summary: Получить настройку
+      operationId: getSearchProfile
+      responses:
+        "200":
+          description: Профиль
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [search-profiles]
+      summary: Обновить настройку
+      description: Частичное обновление — передавайте поля, которые нужно изменить. `eis_config` заменяется целиком, если передан.
+      operationId: updateSearchProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchProfileWrite"
+      responses:
+        "200":
+          description: Обновлено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [search-profiles]
+      summary: Удалить настройку
+      operationId: deleteSearchProfile
+      responses:
+        "200":
+          description: Удалено
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/search-profiles/{id}/eis-url:
+    get:
+      tags: [search-profiles, integration]
+      summary: URL и query для ЕИС
+      description: |
+        Собирает `https://zakupki.gov.ru/epz/order/extendedsearch/results.html?...`
+        из сохранённого `eis_config`.
+
+        **Для воркера / parser-интеграции:** берите `url` или сами добавляйте `pageNumber`
+        к `query` при пагинации. Из HTML-ленты затем извлекайте `reg_number` + `notice_url`
+        и отдавайте в `zakupki-parser` / `POST /api/v1/ingest` platform.
+      operationId: getSearchProfileEisUrl
+      parameters:
+        - $ref: "#/components/parameters/ProfileId"
+      responses:
+        "200":
+          description: Готовый URL поиска
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EisUrlResponse"
+              example:
+                profile_id: 0fc449d6-4063-4681-b193-458999155279
+                name: ПО и разработка
+                url: https://zakupki.gov.ru/epz/order/extendedsearch/results.html?af=on&ca=on&fz223=on&fz44=on&morphology=on&pageNumber=1&recordsPerPage=_10&searchString=%D0%A0%D0%B0%D0%B7%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%BA%D0%B0+%D0%9F%D0%9E&sortBy=UPDATE_DATE&sortDirection=false
+                query:
+                  searchString: ["Разработка ПО"]
+                  fz44: ["on"]
+                  fz223: ["on"]
+                  af: ["on"]
+                  ca: ["on"]
+                  morphology: ["on"]
+                  pageNumber: ["1"]
+                  recordsPerPage: ["_10"]
+                  sortBy: ["UPDATE_DATE"]
+                  sortDirection: ["false"]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Opaque session token из `POST /api/v1/auth/login` (`token`).
+        Альтернатива: cookie `session` (для браузера).
+
+  parameters:
+    ProfileId:
+      name: id
+      in: path
+      required: true
+      description: UUID поискового профиля
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: name required
+    Unauthorized:
+      description: Нет или просрочена сессия
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: unauthorized
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: not found
+    Conflict:
+      description: Конфликт уникальности (имя профиля)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: profile name already exists
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: zakupki-search
+
+    StatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login:
+          type: string
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+          description: Opaque session token для Bearer
+        user:
+          $ref: "#/components/schemas/User"
+
+    User:
+      type: object
+      required: [id, login, display_name, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        login:
+          type: string
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    EISSearchConfig:
+      type: object
+      description: |
+        Параметры расширенного поиска ЕИС
+        (`/epz/order/extendedsearch/results.html`).
+        Поля мапятся в query-параметры сайта.
+      properties:
+        search_string:
+          type: string
+          description: Текст / номер / ИНН / часть названия
+          example: Разработка ПО
+        morphology:
+          type: boolean
+          description: Морфология (игнорируется при strict_equal)
+          default: true
+        strict_equal:
+          type: boolean
+          description: Точное совпадение (удобно для поиска по номеру)
+          default: false
+        fz44:
+          type: boolean
+          default: true
+        fz223:
+          type: boolean
+          default: true
+        pp_rf_615:
+          type: boolean
+          default: false
+        stage_af:
+          type: boolean
+          description: Подача заявок
+          default: true
+        stage_ca:
+          type: boolean
+          description: Работа комиссии
+          default: true
+        stage_pc:
+          type: boolean
+          description: Закупка завершена
+          default: false
+        stage_pa:
+          type: boolean
+          description: Закупка отменена
+          default: false
+        sort_by:
+          type: string
+          enum: [UPDATE_DATE, PUBLISH_DATE, PRICE, RELEVANCE]
+          default: UPDATE_DATE
+        sort_direction:
+          type: boolean
+          description: false — как в UI ЕИС по умолчанию
+          default: false
+        records_per_page:
+          type: string
+          enum: ["_10", "_20", "_50"]
+          default: "_10"
+        price_from:
+          type: number
+          format: double
+          nullable: true
+        price_to:
+          type: number
+          format: double
+          nullable: true
+        publish_date_from:
+          type: string
+          description: DD.MM.YYYY
+          example: "01.01.2026"
+        publish_date_to:
+          type: string
+          description: DD.MM.YYYY
+        appl_close_from:
+          type: string
+          description: Окончание подачи заявок с (DD.MM.YYYY)
+        appl_close_to:
+          type: string
+          description: Окончание подачи заявок по (DD.MM.YYYY)
+        regions:
+          type: array
+          items:
+            type: string
+          description: Заготовка под коды регионов
+        okpd2:
+          type: array
+          items:
+            type: string
+          description: Заготовка под коды ОКПД2
+        customer_title:
+          type: string
+          description: Название заказчика (если задано в фильтрах)
+
+    SearchProfile:
+      type: object
+      required: [id, user_id, name, description, source, eis_config, enabled, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: ПО и разработка
+        description:
+          type: string
+        source:
+          type: string
+          enum: [eis]
+          description: Источник поиска. Пока только ЕИС.
+          default: eis
+        eis_config:
+          $ref: "#/components/schemas/EISSearchConfig"
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SearchProfileWrite:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Обязателен при создании
+        description:
+          type: string
+        source:
+          type: string
+          enum: [eis]
+          default: eis
+        eis_config:
+          $ref: "#/components/schemas/EISSearchConfig"
+        enabled:
+          type: boolean
+          default: true
+
+    SearchProfileList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchProfile"
+
+    EisUrlResponse:
+      type: object
+      required: [profile_id, name, url, query]
+      properties:
+        profile_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+          description: Полный URL первой страницы поиска ЕИС
+        query:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          description: url.Values — карта query-параметров (значения как массивы строк)
+
+    # Документационный контракт handoff (ещё не HTTP API этого сервиса).
+    ParserHandoffItem:
+      type: object
+      description: |
+        Целевой элемент для передачи в zakupki-parser / platform ingest
+        после обхода ленты ЕИС (будущий worker). Не является endpoint'ом search.
+      required: [reg_number]
+      properties:
+        reg_number:
+          type: string
+          example: "0134300097526000797"
+        notice_url:
+          type: string
+          format: uri
+          description: Полный href из карточки поиска (не собирать вручную)
+        law:
+          type: string
+          enum: ["44", "223", "pricereq"]
+        notice_guid:
+          type: string
+          format: uuid
+          description: Для 223-ФЗ, если есть в ленте
+        source_site:
+          type: string
+          example: https://zakupki.gov.ru
+        object_title:
+          type: string
+        status:
+          type: string
+
+security:
+  - bearerAuth: []
