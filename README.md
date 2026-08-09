@@ -58,11 +58,14 @@ go run ./cmd/search
 
 Токен: заголовок `Authorization: Bearer <token>` или cookie `session`.
 
-### Интеграция с parser / platform
+### Интеграция с core / parser
 
 1. Взять профиль: `GET /api/v1/search-profiles/{id}` или готовый URL: `.../eis-url`
 2. Воркер обходит ленту ЕИС (ещё не в этом сервисе)
-3. Handoff в parser — batch с полями `reg_number` (+ `notice_url`, `law`, `notice_guid`); схема `ParserHandoffItem` описана в OpenAPI как целевой контракт
+3. Найденные закупки сохраняются в **zakupki-core** (каталог тендеров)
+4. `zakupki-parser` обогащает карточки по `reg_number` из core
+
+`zakupki-search` не хранит список закупок — только настройки поиска.
 
 ### Пример
 
@@ -106,7 +109,7 @@ curl -s http://localhost:8091/api/v1/search-profiles \
 - `sort_by`, `sort_direction`, `records_per_page`
 - цены/даты, `regions`, `okpd2`, `customer_title`
 
-Сервис пока **хранит и отдаёт конфиг**; воркер обхода ленты ЕИС → handoff в parser будет следующим шагом.
+Сервис хранит и отдаёт поисковый конфиг; каталог закупок — в `zakupki-core`.
 
 ## Схема БД
 

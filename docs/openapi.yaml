@@ -8,7 +8,8 @@ info:
     - UI / gateway: логин пользователя → CRUD профилей поиска
     - `zakupki-search`: хранит named-профили с `eis_config` (JSONB) в PostgreSQL
     - worker (следующий шаг): по профилю ходит в ЕИС `extendedsearch/results.html`
-    - `zakupki-parser` / platform ingest: получает batch `reg_number` (+ `notice_url`, `law`)
+    - `zakupki-core`: **каталог найденных закупок** (system of record)
+    - `zakupki-parser`: обогащение карточки / документов по `reg_number`
 
     ## Как работать другим сервисам
     1. `POST /api/v1/auth/login` → получить `token`
@@ -17,8 +18,9 @@ info:
     4. `GET /api/v1/search-profiles/{id}` — полный `eis_config`
     5. `GET /api/v1/search-profiles/{id}/eis-url` — готовый URL/query для ЕИС
        (удобно для воркера без собственной сборки query)
+    6. Найденные закупки сохранять в **zakupki-core**, не в этом сервисе
 
-    Сейчас сервис **не парсит ленту ЕИС** и не шлёт данные в parser — только auth + хранение конфигов + сборка URL.
+    Этот сервис — auth + хранение поисковых конфигов + сборка URL. Каталог тендеров здесь не ведётся.
 
     Демо-пользователь (миграции): `demo` / `demo`.
   version: 0.1.0
