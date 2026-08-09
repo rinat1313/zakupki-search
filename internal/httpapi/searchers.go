@@ -208,7 +208,7 @@ func (s *Server) handleListSearcherTenders(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if s.Core == nil || !s.Core.Enabled() {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "total": 0})
+		writeError(w, http.StatusServiceUnavailable, "CORE_URL not configured — tenders live in zakupki-core")
 		return
 	}
 	raw, err := s.Core.ListTendersBySearchConfig(r.Context(), id, r.URL.Query().Get("q"))
@@ -241,14 +241,30 @@ func (s *Server) handleRunSearcher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Core != nil && s.Core.Enabled() {
-		_ = s.Core.EnsureCategory(r.Context(), p.ID, p.Name)
+		if err := s.Core.EnsureCategory(r.Context(), p.ID, p.Name); err != nil {
+			log.Printf("core ensure category searcher=%s: %v", id, err)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"run_id":         runID,
+				"searcher_id":    id,
+				"status":         "error",
+				"found_count":    0,
+				"message":        "Не удалось создать категорию в core: " + err.Error(),
+				"auto_ai":        p.AutoAI,
+				"config_version": p.ConfigVersion,
+			})
+			return
+		}
 	}
 
 	// Synchronous first-pass fetch so UI gets found_count; remaining pages can expand later.
 	found := 0
-	msg := "Поиск выполнен. Новые тендеры сохраняются в СУБД и обрабатываются."
+	msg := "Поиск выполнен. Тендеры записаны в zakupki-core и поставлены в очередь сбора."
 	status := "done"
-	if s.EIS != nil {
+	if s.Core == nil || !s.Core.Enabled() {
+		status = "error"
+		msg = "CORE_URL не задан — тендеры некуда сохранять (каталог живёт в zakupki-core)."
+	}
+	if s.EIS != nil && status != "error" {
 		hits, ferr := s.EIS.FetchFirstPages(r.Context(), p.Config, 3)
 		if ferr != nil {
 			log.Printf("eis fetch searcher=%s: %v", id, ferr)
@@ -256,7 +272,7 @@ func (s *Server) handleRunSearcher(w http.ResponseWriter, r *http.Request) {
 			msg = "Ошибка запроса к ЕИС: " + ferr.Error()
 		} else {
 			found = len(hits)
-			if s.Core != nil && s.Core.Enabled() && len(hits) > 0 {
+			if len(hits) > 0 {
 				items := make([]coreclient.SyncItem, 0, len(hits))
 				for _, h := range hits {
 					items = append(items, coreclient.SyncItem{
@@ -267,20 +283,18 @@ func (s *Server) handleRunSearcher(w http.ResponseWriter, r *http.Request) {
 						ObjectName: h.ObjectName,
 					})
 				}
-				if err := s.Core.SyncSearchConfig(r.Context(), p.ID, items, true); err != nil {
+				if err := s.Core.SyncSearchConfig(r.Context(), p.ID, p.Name, p.ConfigVersion, items, true); err != nil {
 					log.Printf("core sync searcher=%s: %v", id, err)
 					status = "error"
 					msg = "ЕИС ок, но sync в core: " + err.Error()
 				}
-			} else if s.Core == nil || !s.Core.Enabled() {
-				msg = "Найдено в ЕИС, но CORE_URL не задан — список в core не обновлён."
-				if found == 0 {
-					msg = "В ЕИС ничего не найдено (или пустая выдача). CORE_URL не задан."
-				}
-			} else if found == 0 {
-				msg = "В ЕИС по текущим фильтрам ничего не найдено."
+			} else {
+				msg = "В ЕИС по текущим фильтрам ничего не найдено (или парсер не увидел карточки)."
 			}
 		}
+	} else if s.EIS == nil && status != "error" {
+		status = "error"
+		msg = "EIS client не инициализирован."
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
