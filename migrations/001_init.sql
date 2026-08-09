@@ -22,6 +22,7 @@ CREATE INDEX sessions_user_id_idx ON sessions(user_id);
 CREATE INDEX sessions_expires_at_idx ON sessions(expires_at);
 
 -- Named search setting owned by a user. eis_config holds EIS query parameters.
+-- id is the stable cross-service key: zakupki-core stores it as search_profile_id.
 CREATE TABLE search_profiles (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

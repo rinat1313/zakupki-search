@@ -11,14 +11,26 @@ info:
     - `zakupki-core`: **каталог найденных закупок** (system of record)
     - `zakupki-parser`: обогащение карточки / документов по `reg_number`
 
+    ## Ключ связи search ↔ core
+    У каждой настройки поиска есть стабильный UUID: `SearchProfile.id`.
+
+    - В этом API поле называется `id` (и `profile_id` в `.../eis-url`).
+    - В `zakupki-core` его нужно сохранять как **`search_profile_id`**
+      (колонка/ключ у записи тендера), чтобы знать, из какого поискового
+      запроса пришла закупка.
+    - `id` выдаётся при `POST /api/v1/search-profiles`, не меняется при UPDATE.
+    - Уникальность внутри search: PK UUID; имя уникально только в рамках `user_id`.
+    - При удалении профиля core должен решить сам: оставить тендеры с
+      «осиротевшим» `search_profile_id` или отвязать (SET NULL) — FK между
+      сервисами нет (разные БД).
+
     ## Как работать другим сервисам
     1. `POST /api/v1/auth/login` → получить `token`
     2. Все защищённые методы: заголовок `Authorization: Bearer <token>`
     3. `GET /api/v1/search-profiles` — список настроек пользователя
     4. `GET /api/v1/search-profiles/{id}` — полный `eis_config`
     5. `GET /api/v1/search-profiles/{id}/eis-url` — готовый URL/query для ЕИС
-       (удобно для воркера без собственной сборки query)
-    6. Найденные закупки сохранять в **zakupki-core**, не в этом сервисе
+    6. Найденные закупки → **zakupki-core** вместе с `search_profile_id = profile.id`
 
     Этот сервис — auth + хранение поисковых конфигов + сборка URL. Каталог тендеров здесь не ведётся.
 
@@ -503,12 +515,19 @@ components:
         id:
           type: string
           format: uuid
+          description: |
+            Уникальный идентификатор конфигурации поиска (PK).
+            Стабилен после создания. Именно это значение `zakupki-core`
+            должен писать в поле `search_profile_id` у тендера.
+          example: 0fc449d6-4063-4681-b193-458999155279
         user_id:
           type: string
           format: uuid
+          description: Владелец настройки (не ключ для core-каталога)
         name:
           type: string
           example: ПО и разработка
+          description: Человекочитаемое имя; уникально только в рамках user_id
         description:
           type: string
         source:
@@ -561,6 +580,8 @@ components:
         profile_id:
           type: string
           format: uuid
+          description: |
+            То же, что `SearchProfile.id` — ключ для `zakupki-core.search_profile_id`.
         name:
           type: string
         url:
@@ -575,28 +596,33 @@ components:
               type: string
           description: url.Values — карта query-параметров (значения как массивы строк)
 
-    # Документационный контракт handoff (ещё не HTTP API этого сервиса).
-    ParserHandoffItem:
+    # Контракт записи в zakupki-core (не endpoint этого сервиса).
+    CoreTenderLink:
       type: object
       description: |
-        Целевой элемент для передачи в zakupki-parser / platform ingest
-        после обхода ленты ЕИС (будущий worker). Не является endpoint'ом search.
-      required: [reg_number]
+        Минимальная связь тендера в zakupki-core с настройкой поиска.
+        Рекомендуемые поля каталога core.
+      required: [search_profile_id, reg_number]
       properties:
+        search_profile_id:
+          type: string
+          format: uuid
+          description: |
+            Копия `SearchProfile.id` из zakupki-search.
+            Не FK между БД — логическая ссылка между сервисами.
+          example: 0fc449d6-4063-4681-b193-458999155279
         reg_number:
           type: string
           example: "0134300097526000797"
         notice_url:
           type: string
           format: uri
-          description: Полный href из карточки поиска (не собирать вручную)
         law:
           type: string
           enum: ["44", "223", "pricereq"]
         notice_guid:
           type: string
           format: uuid
-          description: Для 223-ФЗ, если есть в ленте
         source_site:
           type: string
           example: https://zakupki.gov.ru
@@ -604,6 +630,13 @@ components:
           type: string
         status:
           type: string
+
+    ParserHandoffItem:
+      allOf:
+        - $ref: "#/components/schemas/CoreTenderLink"
+      description: |
+        Handoff worker → core / parser. Обязателен `search_profile_id`,
+        чтобы каталог core знал исходный поисковый запрос.
 
 security:
   - bearerAuth: []
