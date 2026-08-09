@@ -5,22 +5,23 @@ info:
     Сервис хранения пользовательских **поисковых настроек ЕИС** и подготовки параметров поиска закупок.
 
     ## Роль в стеке
-    - UI / gateway: логин → CRUD профилей поиска и списка найденных закупок
-    - `zakupki-search`: PostgreSQL — профили (`eis_config`) + каталог тендеров (`tenders`)
-    - worker (следующий шаг): по профилю ходит в ЕИС → `POST /api/v1/tenders/batch`
-    - `zakupki-parser`: забирает список / получает batch для обогащения карточки
+    - UI / gateway: логин пользователя → CRUD профилей поиска
+    - `zakupki-search`: хранит named-профили с `eis_config` (JSONB) в PostgreSQL
+    - worker (следующий шаг): по профилю ходит в ЕИС `extendedsearch/results.html`
+    - `zakupki-parser` / platform ingest: получает batch `reg_number` (+ `notice_url`, `law`)
 
     ## Как работать другим сервисам
     1. `POST /api/v1/auth/login` → получить `token`
     2. Все защищённые методы: заголовок `Authorization: Bearer <token>`
-    3. Профили: `GET/POST /api/v1/search-profiles`, `.../eis-url`
-    4. Тендеры: `GET/POST /api/v1/tenders`, `POST /api/v1/tenders/batch`, `PUT/DELETE /api/v1/tenders/{id}`
-    5. Уникальность тендера: `(user_id, source_site, reg_number)`
+    3. `GET /api/v1/search-profiles` — список настроек пользователя
+    4. `GET /api/v1/search-profiles/{id}` — полный `eis_config`
+    5. `GET /api/v1/search-profiles/{id}/eis-url` — готовый URL/query для ЕИС
+       (удобно для воркера без собственной сборки query)
 
-    Сервис хранит **лёгкий список** (reg_number, notice_url, law, сниппет). Документы/полный parse — у parser.
+    Сейчас сервис **не парсит ленту ЕИС** и не шлёт данные в parser — только auth + хранение конфигов + сборка URL.
 
     Демо-пользователь (миграции): `demo` / `demo`.
-  version: 0.2.0
+  version: 0.1.0
   contact:
     name: zakupki-platform
     url: https://github.com/rinat1313/zakupki-search
@@ -38,10 +39,8 @@ tags:
     description: Логин / сессии
   - name: search-profiles
     description: Именованные поисковые настройки пользователя (ЕИС)
-  - name: tenders
-    description: Каталог найденных закупок (CRUD + batch upsert)
   - name: integration
-    description: Подсказки для parser / worker
+    description: Подсказки для parser / platform (контракт handoff)
 
 paths:
   /health:
@@ -285,203 +284,6 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /api/v1/tenders:
-    get:
-      tags: [tenders]
-      summary: Список найденных закупок
-      operationId: listTenders
-      parameters:
-        - name: profile_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-          description: Фильтр по поисковому профилю
-        - name: law
-          in: query
-          schema:
-            type: string
-            enum: ["44", "223", "pricereq"]
-        - name: q
-          in: query
-          schema:
-            type: string
-          description: Поиск по reg_number / object_title / org_name
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            default: 50
-            maximum: 200
-        - name: offset
-          in: query
-          schema:
-            type: integer
-            default: 0
-      responses:
-        "200":
-          description: Список
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TenderList"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-    post:
-      tags: [tenders]
-      summary: Создать закупку
-      operationId: createTender
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenderWrite"
-            example:
-              reg_number: "0134300097526000797"
-              law: "44"
-              notice_url: https://zakupki.gov.ru/epz/order/notice/ea20/view/common-info.html?regNumber=0134300097526000797
-              object_title: Поставка ПО
-              status: Подача заявок
-              price_raw: "1 250 000,00 ₽"
-      responses:
-        "201":
-          description: Создано
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Tender"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "409":
-          $ref: "#/components/responses/Conflict"
-    delete:
-      tags: [tenders]
-      summary: Удалить все закупки профиля
-      description: Требует query `profile_id`.
-      operationId: deleteTendersByProfile
-      parameters:
-        - name: profile_id
-          in: query
-          required: true
-          schema:
-            type: string
-            format: uuid
-      responses:
-        "200":
-          description: Удалено
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [status, deleted]
-                properties:
-                  status:
-                    type: string
-                    example: ok
-                  deleted:
-                    type: integer
-                    format: int64
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /api/v1/tenders/batch:
-    post:
-      tags: [tenders, integration]
-      summary: Batch upsert закупок
-      description: |
-        Основной handoff от worker/search: upsert по `(source_site, reg_number)`.
-        Пустые поля при update не затирают уже сохранённые значения.
-        Максимум 500 items за запрос.
-      operationId: batchUpsertTenders
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenderBatchRequest"
-            example:
-              items:
-                - reg_number: "0134300097526000797"
-                  law: "44"
-                  notice_url: https://zakupki.gov.ru/epz/order/notice/ea20/view/common-info.html?regNumber=0134300097526000797
-                  object_title: Поставка ПО
-                  status: Подача заявок
-      responses:
-        "200":
-          description: Upsert выполнен
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TenderBatchResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /api/v1/tenders/{id}:
-    parameters:
-      - $ref: "#/components/parameters/TenderId"
-    get:
-      tags: [tenders]
-      summary: Получить закупку
-      operationId: getTender
-      responses:
-        "200":
-          description: Запись
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Tender"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-    put:
-      tags: [tenders]
-      summary: Обновить закупку
-      operationId: updateTender
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TenderWrite"
-      responses:
-        "200":
-          description: Обновлено
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Tender"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "409":
-          $ref: "#/components/responses/Conflict"
-    delete:
-      tags: [tenders]
-      summary: Удалить закупку
-      operationId: deleteTender
-      responses:
-        "200":
-          description: Удалено
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StatusResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-
 components:
   securitySchemes:
     bearerAuth:
@@ -498,14 +300,6 @@ components:
       in: path
       required: true
       description: UUID поискового профиля
-      schema:
-        type: string
-        format: uuid
-    TenderId:
-      name: id
-      in: path
-      required: true
-      description: UUID записи тендера
       schema:
         type: string
         format: uuid
@@ -779,159 +573,12 @@ components:
               type: string
           description: url.Values — карта query-параметров (значения как массивы строк)
 
-    Tender:
-      type: object
-      required:
-        - id
-        - user_id
-        - reg_number
-        - law
-        - notice_url
-        - notice_guid
-        - source_site
-        - object_title
-        - status
-        - price_raw
-        - org_name
-        - published_at
-        - updated_on_site
-        - application_end
-        - found_at
-        - created_at
-        - updated_at
-      properties:
-        id:
-          type: string
-          format: uuid
-        user_id:
-          type: string
-          format: uuid
-        profile_id:
-          type: string
-          format: uuid
-          nullable: true
-          description: Поисковой профиль, из которого нашли закупку
-        reg_number:
-          type: string
-          example: "0134300097526000797"
-        law:
-          type: string
-          description: "44 | 223 | pricereq"
-          example: "44"
-        notice_url:
-          type: string
-          description: Полный href из ленты ЕИС (не собирать вручную)
-        notice_guid:
-          type: string
-          description: Для 223-ФЗ
-        source_site:
-          type: string
-          default: https://zakupki.gov.ru
-        object_title:
-          type: string
-        status:
-          type: string
-        price_raw:
-          type: string
-        org_name:
-          type: string
-        published_at:
-          type: string
-          description: Как в ленте (часто DD.MM.YYYY)
-        updated_on_site:
-          type: string
-        application_end:
-          type: string
-        payload:
-          type: object
-          additionalProperties: true
-        found_at:
-          type: string
-          format: date-time
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    TenderWrite:
-      type: object
-      required: [reg_number]
-      properties:
-        profile_id:
-          type: string
-          format: uuid
-          nullable: true
-        reg_number:
-          type: string
-        law:
-          type: string
-        notice_url:
-          type: string
-        notice_guid:
-          type: string
-        source_site:
-          type: string
-        object_title:
-          type: string
-        status:
-          type: string
-        price_raw:
-          type: string
-        org_name:
-          type: string
-        published_at:
-          type: string
-        updated_on_site:
-          type: string
-        application_end:
-          type: string
-        payload:
-          type: object
-          additionalProperties: true
-
-    TenderList:
-      type: object
-      required: [items, total, limit, offset]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/Tender"
-        total:
-          type: integer
-        limit:
-          type: integer
-        offset:
-          type: integer
-
-    TenderBatchRequest:
-      type: object
-      required: [items]
-      properties:
-        items:
-          type: array
-          maxItems: 500
-          items:
-            $ref: "#/components/schemas/TenderWrite"
-
-    TenderBatchResponse:
-      type: object
-      required: [items, count]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: "#/components/schemas/Tender"
-        count:
-          type: integer
-
+    # Документационный контракт handoff (ещё не HTTP API этого сервиса).
     ParserHandoffItem:
       type: object
       description: |
-        Элемент handoff в parser. Совпадает по смыслу с TenderWrite / записью tenders.
-        Parser читает каталог через GET /api/v1/tenders или принимает batch извне.
+        Целевой элемент для передачи в zakupki-parser / platform ingest
+        после обхода ленты ЕИС (будущий worker). Не является endpoint'ом search.
       required: [reg_number]
       properties:
         reg_number:
@@ -940,12 +587,14 @@ components:
         notice_url:
           type: string
           format: uri
+          description: Полный href из карточки поиска (не собирать вручную)
         law:
           type: string
           enum: ["44", "223", "pricereq"]
         notice_guid:
           type: string
           format: uuid
+          description: Для 223-ФЗ, если есть в ленте
         source_site:
           type: string
           example: https://zakupki.gov.ru
