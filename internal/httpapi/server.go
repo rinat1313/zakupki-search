@@ -9,21 +9,27 @@ import (
 
 	"github.com/rinat1313/zakupki-search/docs"
 	"github.com/rinat1313/zakupki-search/internal/config"
+	"github.com/rinat1313/zakupki-search/internal/coreclient"
 	"github.com/rinat1313/zakupki-search/internal/db"
+	"github.com/rinat1313/zakupki-search/internal/eissearch"
 	"github.com/rinat1313/zakupki-search/internal/models"
 )
 
 type Server struct {
 	Store  *db.Store
 	Cfg    config.Config
+	Core   *coreclient.Client
+	EIS    *eissearch.Fetcher
 	Mux    *http.ServeMux
 	logger *log.Logger
 }
 
-func New(store *db.Store, cfg config.Config) *Server {
+func New(store *db.Store, cfg config.Config, core *coreclient.Client, eis *eissearch.Fetcher) *Server {
 	s := &Server{
 		Store:  store,
 		Cfg:    cfg,
+		Core:   core,
+		EIS:    eis,
 		Mux:    http.NewServeMux(),
 		logger: log.Default(),
 	}
@@ -40,18 +46,30 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.handleLogout))
 	s.Mux.HandleFunc("GET /api/v1/auth/me", s.requireAuth(s.handleMe))
 
+	// Legacy / internal
 	s.Mux.HandleFunc("GET /api/v1/search-profiles", s.requireAuth(s.handleListProfiles))
 	s.Mux.HandleFunc("POST /api/v1/search-profiles", s.requireAuth(s.handleCreateProfile))
 	s.Mux.HandleFunc("GET /api/v1/search-profiles/{id}", s.requireAuth(s.handleGetProfile))
 	s.Mux.HandleFunc("PUT /api/v1/search-profiles/{id}", s.requireAuth(s.handleUpdateProfile))
 	s.Mux.HandleFunc("DELETE /api/v1/search-profiles/{id}", s.requireAuth(s.handleDeleteProfile))
 	s.Mux.HandleFunc("GET /api/v1/search-profiles/{id}/eis-url", s.requireAuth(s.handleProfileEISURL))
+
+	// Gateway UI contract (searchers.js)
+	s.Mux.HandleFunc("GET /api/v1/searchers", s.requireAuth(s.handleListSearchers))
+	s.Mux.HandleFunc("POST /api/v1/searchers", s.requireAuth(s.handleCreateSearcher))
+	s.Mux.HandleFunc("GET /api/v1/searchers/{id}", s.requireAuth(s.handleGetSearcher))
+	s.Mux.HandleFunc("PUT /api/v1/searchers/{id}", s.requireAuth(s.handleUpdateSearcher))
+	s.Mux.HandleFunc("DELETE /api/v1/searchers/{id}", s.requireAuth(s.handleDeleteSearcher))
+	s.Mux.HandleFunc("PUT /api/v1/searchers/{id}/auto-ai", s.requireAuth(s.handleSetSearcherAutoAI))
+	s.Mux.HandleFunc("GET /api/v1/searchers/{id}/tenders", s.requireAuth(s.handleListSearcherTenders))
+	s.Mux.HandleFunc("POST /api/v1/searchers/{id}/run", s.requireAuth(s.handleRunSearcher))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"service": "zakupki-search",
+		"core":    s.Core != nil && s.Core.Enabled(),
 	})
 }
 

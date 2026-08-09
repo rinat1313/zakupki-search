@@ -27,7 +27,14 @@ func (s *Store) UserByTokenHash(ctx context.Context, tokenHash string) (models.U
 	if errors.Is(err, pgx.ErrNoRows) {
 		return u, ErrNotFound
 	}
-	return u, err
+	if err != nil {
+		return u, err
+	}
+	u.Name = u.DisplayName
+	if u.Name == "" {
+		u.Name = u.Login
+	}
+	return u, nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {

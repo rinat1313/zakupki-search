@@ -41,20 +41,22 @@ go run ./cmd/search
 
 В UI можно вызвать `Authorize` и вставить Bearer token после login.
 
-## API
+## API для gateway UI (`/api/v1/searchers`)
 
-| Method | Path | Auth | Описание |
-|--------|------|------|----------|
-| GET | `/health` | — | health |
-| POST | `/api/v1/auth/login` | — | `{login,password}` → `{token,user}` |
-| POST | `/api/v1/auth/logout` | Bearer | завершить сессию |
-| GET | `/api/v1/auth/me` | Bearer | текущий пользователь |
-| GET | `/api/v1/search-profiles` | Bearer | список настроек |
-| POST | `/api/v1/search-profiles` | Bearer | создать настройку |
-| GET | `/api/v1/search-profiles/{id}` | Bearer | получить |
-| PUT | `/api/v1/search-profiles/{id}` | Bearer | обновить |
-| DELETE | `/api/v1/search-profiles/{id}` | Bearer | удалить |
-| GET | `/api/v1/search-profiles/{id}/eis-url` | Bearer | URL/query для ЕИС |
+Контракт под `zakupki-gateway` → `SEARCH_URL` (`ui/searchers.js`):
+
+| Method | Path | Описание |
+|--------|------|----------|
+| POST | `/api/v1/auth/login` | `{login,password}` → `{token,user}` (`user.name`) |
+| GET/POST | `/api/v1/searchers` | список / создать (`name`, `config`, `auto_ai`) |
+| GET/PUT/DELETE | `/api/v1/searchers/{id}` | CRUD |
+| PUT | `/api/v1/searchers/{id}/auto-ai` | `{enabled}` — AI на этот поиск |
+| POST | `/api/v1/searchers/{id}/run` | ЕИС → sync в core (`search_config_id`) |
+| GET | `/api/v1/searchers/{id}/tenders` | прокси списка из core |
+
+Env: `CORE_URL` (например `http://127.0.0.1:8080`) — без него UI покажет 0 тендеров.
+
+Legacy: `/api/v1/search-profiles` (+ `eis-url`).
 
 Токен: заголовок `Authorization: Bearer <token>` или cookie `session`.
 

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/rinat1313/zakupki-search/internal/config"
+	"github.com/rinat1313/zakupki-search/internal/coreclient"
 	"github.com/rinat1313/zakupki-search/internal/db"
+	"github.com/rinat1313/zakupki-search/internal/eissearch"
 	"github.com/rinat1313/zakupki-search/internal/httpapi"
 )
 
@@ -41,7 +43,15 @@ func main() {
 		log.Printf("deleted %d expired sessions", n)
 	}
 
-	api := httpapi.New(store, cfg)
+	core := coreclient.New(cfg.CoreURL)
+	if core != nil && core.Enabled() {
+		log.Printf("core client: %s", cfg.CoreURL)
+	} else {
+		log.Printf("core client: disabled (set CORE_URL to enable tenders/sync)")
+	}
+	eis := eissearch.New(cfg.EISBaseURL)
+
+	api := httpapi.New(store, cfg, core, eis)
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           withCORS(api.Mux),
@@ -49,7 +59,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("zakupki-search listening on %s; swagger UI at /swagger/", cfg.HTTPAddr)
+		log.Printf("zakupki-search listening on %s; swagger UI at /swagger/; searchers API ready", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}

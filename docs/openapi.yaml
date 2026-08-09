@@ -42,14 +42,25 @@ info:
 
     Этот сервис каталог не хранит — только конфиг и версию для триггера sync.
 
-    ## Как работать другим сервисам
-    1. `POST /api/v1/auth/login` → получить `token`
-    2. Bearer на защищённых методах
-    3. CRUD `/api/v1/search-profiles`, `.../eis-url`
-    4. Найденные закупки → **zakupki-core** с `search_profile_id` + `config_version`
+    ## Gateway UI (поисковики)
+    UI gateway (`SEARCH_URL`) использует контракт **`/api/v1/searchers*`**
+    (см. `ui/searchers.js`):
 
-    Демо-пользователь (миграции): `demo` / `demo`.
-  version: 0.2.0
+    - `POST /api/v1/auth/login` → `{token,user}` (`user.name`)
+    - `GET/POST /api/v1/searchers`, `GET/PUT/DELETE /api/v1/searchers/{id}`
+    - `PUT /api/v1/searchers/{id}/auto-ai` `{enabled|auto_ai}` — AI на **этот** поиск
+    - `POST /api/v1/searchers/{id}/run` — обход ЕИС → sync в core (`search_config_id=id`, enqueue)
+    - `GET /api/v1/searchers/{id}/tenders` — прокси списка из core
+
+    Поля Searcher: `id`, `name`, `config`, `auto_ai`, `tenders_count`, `last_run_at`.
+    `config` — фильтры ЕИС (UI-формат: `pp_rf615`, `records_per_page` как 10/20/50).
+
+    Legacy: `/api/v1/search-profiles` по-прежнему доступен.
+
+    Env: `CORE_URL` — для tenders/sync; без него run всё равно ходит в ЕИС, но не пишет в core.
+
+    Демо-пользователь: `demo` / `demo`.
+  version: 0.3.0
   contact:
     name: zakupki-platform
     url: https://github.com/rinat1313/zakupki-search
@@ -65,10 +76,12 @@ tags:
     description: Проверка доступности
   - name: auth
     description: Логин / сессии
+  - name: searchers
+    description: API для gateway UI (поисковики ЕИС)
   - name: search-profiles
-    description: Именованные поисковые настройки пользователя (ЕИС)
+    description: Legacy API настроек поиска
   - name: integration
-    description: Подсказки для parser / platform (контракт handoff)
+    description: Подсказки для core / parser
 
 paths:
   /health:
@@ -152,6 +165,171 @@ paths:
                 $ref: "#/components/schemas/User"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/searchers:
+    get:
+      tags: [searchers]
+      summary: Список поисковиков (UI)
+      operationId: listSearchers
+      responses:
+        "200":
+          description: Массив Searcher (UI также принимает {items})
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Searcher"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [searchers]
+      summary: Создать поисковик
+      operationId: createSearcher
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearcherWrite"
+      responses:
+        "201":
+          description: Создано
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Searcher"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/searchers/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      tags: [searchers]
+      summary: Получить поисковик
+      operationId: getSearcher
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Searcher"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [searchers]
+      summary: Обновить поисковик
+      operationId: updateSearcher
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearcherWrite"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Searcher"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [searchers]
+      summary: Удалить поисковик
+      operationId: deleteSearcher
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/searchers/{id}/auto-ai:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    put:
+      tags: [searchers]
+      summary: Включить/выключить авто-AI для поисковика
+      operationId: setSearcherAutoAI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                auto_ai:
+                  type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Searcher"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/searchers/{id}/run:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    post:
+      tags: [searchers]
+      summary: Запустить поиск ЕИС и sync в core
+      description: |
+        Обходит выдачу ЕИС, пушит snapshot в
+        `POST /api/v1/categories/by-search-config/{id}/sync` (enqueue=true).
+        При `auto_ai=true` на поисковике core должен анализировать новые карточки.
+      operationId: runSearcher
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearcherRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/searchers/{id}/tenders:
+    parameters:
+      - $ref: "#/components/parameters/ProfileId"
+    get:
+      tags: [searchers]
+      summary: Тендеры поисковика (прокси core)
+      operationId: listSearcherTenders
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Ответ core GET /tenders?search_config_id=
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: core недоступен
 
   /api/v1/search-profiles:
     get:
@@ -415,13 +593,16 @@ components:
 
     User:
       type: object
-      required: [id, login, display_name, created_at, updated_at]
+      required: [id, login, name, display_name, created_at, updated_at]
       properties:
         id:
           type: string
           format: uuid
         login:
           type: string
+        name:
+          type: string
+          description: Для UI gateway (chip пользователя)
         display_name:
           type: string
         created_at:
@@ -430,6 +611,132 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    Searcher:
+      type: object
+      required: [id, name, config, auto_ai, tenders_count, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: = search_config_id в zakupki-core
+        name:
+          type: string
+        config:
+          $ref: "#/components/schemas/SearcherConfig"
+        auto_ai:
+          type: boolean
+        tenders_count:
+          type: integer
+        last_run_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SearcherWrite:
+      type: object
+      required: [name, config]
+      properties:
+        name:
+          type: string
+        config:
+          $ref: "#/components/schemas/SearcherConfig"
+        auto_ai:
+          type: boolean
+
+    SearcherConfig:
+      type: object
+      description: UI-формат фильтров ЕИС (gateway searchers.js)
+      properties:
+        search_string:
+          type: string
+        morphology:
+          type: boolean
+        strict_equal:
+          type: boolean
+        fz44:
+          type: boolean
+        fz223:
+          type: boolean
+        pp_rf615:
+          type: boolean
+        stage_af:
+          type: boolean
+        stage_ca:
+          type: boolean
+        stage_pc:
+          type: boolean
+        stage_pa:
+          type: boolean
+        publish_date_from:
+          type: string
+          nullable: true
+        publish_date_to:
+          type: string
+          nullable: true
+        appl_submission_close_date_from:
+          type: string
+          nullable: true
+        appl_submission_close_date_to:
+          type: string
+          nullable: true
+        price_from:
+          type: number
+          nullable: true
+        price_to:
+          type: number
+          nullable: true
+        currency_code:
+          type: string
+        okpd2_codes:
+          type: string
+        okpd2_with_nested:
+          type: boolean
+        okpd2_several:
+          type: boolean
+        customer_title:
+          type: string
+        placing_way_list:
+          type: string
+        smp_sono:
+          type: boolean
+        joint_purchase:
+          type: boolean
+        sort_by:
+          type: string
+        sort_direction:
+          type: boolean
+        records_per_page:
+          type: integer
+          enum: [10, 20, 50]
+
+    SearcherRun:
+      type: object
+      properties:
+        run_id:
+          type: string
+          format: uuid
+        searcher_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, done, error]
+        found_count:
+          type: integer
+        message:
+          type: string
+        auto_ai:
+          type: boolean
+        config_version:
+          type: integer
+          format: int64
 
     EISSearchConfig:
       type: object

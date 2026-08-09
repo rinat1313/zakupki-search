@@ -10,11 +10,13 @@ import (
 )
 
 type profileRequest struct {
-	Name        string                `json:"name"`
-	Description string                `json:"description"`
-	Source      string                `json:"source"`
-	EISConfig   *models.EISSearchConfig `json:"eis_config"`
-	Enabled     *bool                 `json:"enabled"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Source      string                 `json:"source"`
+	EISConfig   *models.SearcherConfig `json:"eis_config"`
+	Config      *models.SearcherConfig `json:"config"`
+	Enabled     *bool                  `json:"enabled"`
+	AutoAI      *bool                  `json:"auto_ai"`
 }
 
 func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +55,19 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name required")
 		return
 	}
-	cfg := models.DefaultEISSearchConfig()
-	if req.EISConfig != nil {
+	cfg := models.DefaultSearcherConfig()
+	if req.Config != nil {
+		cfg = *req.Config
+	} else if req.EISConfig != nil {
 		cfg = *req.EISConfig
 	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
+	}
+	autoAI := false
+	if req.AutoAI != nil {
+		autoAI = *req.AutoAI
 	}
 	source := strings.TrimSpace(req.Source)
 	if source == "" {
@@ -74,8 +82,9 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 		Name:        name,
 		Description: strings.TrimSpace(req.Description),
 		Source:      source,
-		EISConfig:   cfg,
+		Config:      cfg,
 		Enabled:     enabled,
+		AutoAI:      autoAI,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -112,11 +121,18 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.Description != "" || req.Name != "" {
 		existing.Description = strings.TrimSpace(req.Description)
 	}
-	if req.EISConfig != nil {
+	if req.Config != nil {
+		existing.Config = *req.Config
+		existing.EISConfig = *req.Config
+	} else if req.EISConfig != nil {
+		existing.Config = *req.EISConfig
 		existing.EISConfig = *req.EISConfig
 	}
 	if req.Enabled != nil {
 		existing.Enabled = *req.Enabled
+	}
+	if req.AutoAI != nil {
+		existing.AutoAI = *req.AutoAI
 	}
 	if src := strings.TrimSpace(req.Source); src != "" {
 		if src != "eis" {
@@ -169,8 +185,9 @@ func (s *Server) handleProfileEISURL(w http.ResponseWriter, r *http.Request) {
 		"profile_id":     p.ID,
 		"config_version": p.ConfigVersion,
 		"name":           p.Name,
-		"url":            p.EISConfig.ResultsURL(s.Cfg.EISBaseURL),
-		"query":          p.EISConfig.QueryValues(),
+		"url":            p.Config.ResultsURL(s.Cfg.EISBaseURL),
+		"query":          p.Config.QueryValues(),
+		"auto_ai":        p.AutoAI,
 	})
 }
 

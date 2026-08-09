@@ -7,11 +7,12 @@ import (
 )
 
 type Config struct {
-	HTTPAddr       string
-	DatabaseURL    string
-	SessionTTL     time.Duration
-	EISBaseURL     string
-	SeedDemoUser   bool
+	HTTPAddr     string
+	DatabaseURL  string
+	SessionTTL   time.Duration
+	EISBaseURL   string
+	CoreURL      string
+	SeedDemoUser bool
 }
 
 func FromEnv() Config {
@@ -21,6 +22,7 @@ func FromEnv() Config {
 		DatabaseURL:  env("DATABASE_URL", "postgres://zakupki:zakupki@localhost:5432/zakupki_search?sslmode=disable"),
 		SessionTTL:   time.Duration(ttlHours) * time.Hour,
 		EISBaseURL:   env("EIS_BASE_URL", "https://zakupki.gov.ru"),
+		CoreURL:      env("CORE_URL", ""),
 		SeedDemoUser: env("SEED_DEMO_USER", "true") == "true",
 	}
 }

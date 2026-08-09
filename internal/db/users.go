@@ -39,6 +39,10 @@ func (s *Store) GetUserByID(ctx context.Context, id string) (models.User, error)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return u, ErrNotFound
 	}
+	u.Name = u.DisplayName
+	if u.Name == "" {
+		u.Name = u.Login
+	}
 	return u, err
 }
 
@@ -53,9 +57,22 @@ func (s *Store) CreateUser(ctx context.Context, login, passwordHash, displayName
 	if err != nil {
 		return u, fmt.Errorf("create user: %w", err)
 	}
+	u.Name = u.DisplayName
+	if u.Name == "" {
+		u.Name = u.Login
+	}
 	return u, nil
 }
 
 func (u userRow) Public() models.User {
-	return models.User{ID: u.ID, Login: u.Login, DisplayName: u.DisplayName}
+	name := u.DisplayName
+	if name == "" {
+		name = u.Login
+	}
+	return models.User{
+		ID:          u.ID,
+		Login:       u.Login,
+		Name:        name,
+		DisplayName: u.DisplayName,
+	}
 }
