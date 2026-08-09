@@ -2,13 +2,13 @@
 
 Микросервис поисковых настроек для ЕИС (`zakupki.gov.ru`).
 
-Пользователь логинится и управляет **своим списком поисковых профилей**.  
-Каждый профиль имеет название и JSON-конфиг фильтров ЕИС, из которого потом можно собрать URL поиска и отдать найденные закупки в `zakupki-parser`.
+Пользователь логинится и управляет **своим списком поисковых профилей** и **каталогом найденных закупок**.  
+Профиль хранит JSON-конфиг фильтров ЕИС; найденные тендеры сохраняются в Postgres (лёгкий список) и могут отдаваться в `zakupki-parser`.
 
 ## Стек
 
 - Go HTTP API (`:8091`)
-- PostgreSQL — пользователи, сессии, `search_profiles.eis_config` (JSONB)
+- PostgreSQL — пользователи, сессии, `search_profiles`, `tenders`
 
 ## Быстрый старт
 
@@ -55,14 +55,41 @@ go run ./cmd/search
 | PUT | `/api/v1/search-profiles/{id}` | Bearer | обновить |
 | DELETE | `/api/v1/search-profiles/{id}` | Bearer | удалить |
 | GET | `/api/v1/search-profiles/{id}/eis-url` | Bearer | URL/query для ЕИС |
+| GET | `/api/v1/tenders` | Bearer | список найденных закупок |
+| POST | `/api/v1/tenders` | Bearer | создать закупку |
+| POST | `/api/v1/tenders/batch` | Bearer | batch upsert |
+| GET | `/api/v1/tenders/{id}` | Bearer | получить |
+| PUT | `/api/v1/tenders/{id}` | Bearer | обновить |
+| DELETE | `/api/v1/tenders/{id}` | Bearer | удалить |
+| DELETE | `/api/v1/tenders?profile_id=` | Bearer | удалить все по профилю |
 
 Токен: заголовок `Authorization: Bearer <token>` или cookie `session`.
 
-### Интеграция с parser / platform
+### Каталог тендеров
 
-1. Взять профиль: `GET /api/v1/search-profiles/{id}` или готовый URL: `.../eis-url`
-2. Воркер обходит ленту ЕИС (ещё не в этом сервисе)
-3. Handoff в parser — batch с полями `reg_number` (+ `notice_url`, `law`, `notice_guid`); схема `ParserHandoffItem` описана в OpenAPI как целевой контракт
+Уникальность: `(user_id, source_site, reg_number)`.  
+Хранится лёгкий сниппет из ленты ЕИС (`reg_number`, `notice_url`, `law`, статус, цена…). Документы — зона parser.
+
+```bash
+curl -s -X POST http://localhost:8091/api/v1/tenders/batch \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "items": [{
+      "reg_number": "0134300097526000797",
+      "law": "44",
+      "notice_url": "https://zakupki.gov.ru/epz/order/notice/ea20/view/common-info.html?regNumber=0134300097526000797",
+      "object_title": "Поставка ПО",
+      "status": "Подача заявок"
+    }]
+  }'
+```
+
+### Интеграция с parser
+
+1. Профиль / `eis-url` → воркер обходит ленту ЕИС
+2. `POST /api/v1/tenders/batch` — сохранить найденное
+3. Parser читает `GET /api/v1/tenders` или получает те же поля для обогащения
 
 ### Пример
 
@@ -106,10 +133,11 @@ curl -s http://localhost:8091/api/v1/search-profiles \
 - `sort_by`, `sort_direction`, `records_per_page`
 - цены/даты, `regions`, `okpd2`, `customer_title`
 
-Сервис пока **хранит и отдаёт конфиг**; воркер обхода ленты ЕИС → handoff в parser будет следующим шагом.
+Воркер обхода ленты ЕИС (автопоиск по профилю) — следующий шаг; запись найденного уже есть через API.
 
 ## Схема БД
 
 - `users` — логин/пароль (bcrypt)
 - `sessions` — opaque token (sha256 в БД)
 - `search_profiles` — `(user_id, name)` + `eis_config JSONB`
+- `tenders` — найденные закупки, unique `(user_id, source_site, reg_number)`

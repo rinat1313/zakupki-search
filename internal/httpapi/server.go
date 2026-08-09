@@ -46,6 +46,14 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("PUT /api/v1/search-profiles/{id}", s.requireAuth(s.handleUpdateProfile))
 	s.Mux.HandleFunc("DELETE /api/v1/search-profiles/{id}", s.requireAuth(s.handleDeleteProfile))
 	s.Mux.HandleFunc("GET /api/v1/search-profiles/{id}/eis-url", s.requireAuth(s.handleProfileEISURL))
+
+	s.Mux.HandleFunc("GET /api/v1/tenders", s.requireAuth(s.handleListTenders))
+	s.Mux.HandleFunc("POST /api/v1/tenders", s.requireAuth(s.handleCreateTender))
+	s.Mux.HandleFunc("POST /api/v1/tenders/batch", s.requireAuth(s.handleBatchUpsertTenders))
+	s.Mux.HandleFunc("DELETE /api/v1/tenders", s.requireAuth(s.handleDeleteTendersByProfile))
+	s.Mux.HandleFunc("GET /api/v1/tenders/{id}", s.requireAuth(s.handleGetTender))
+	s.Mux.HandleFunc("PUT /api/v1/tenders/{id}", s.requireAuth(s.handleUpdateTender))
+	s.Mux.HandleFunc("DELETE /api/v1/tenders/{id}", s.requireAuth(s.handleDeleteTender))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
