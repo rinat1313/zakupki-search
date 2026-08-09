@@ -16,26 +16,40 @@ info:
 
     - В этом API поле называется `id` (и `profile_id` в `.../eis-url`).
     - В `zakupki-core` его нужно сохранять как **`search_profile_id`**
-      (колонка/ключ у записи тендера), чтобы знать, из какого поискового
-      запроса пришла закупка.
-    - `id` выдаётся при `POST /api/v1/search-profiles`, не меняется при UPDATE.
-    - Уникальность внутри search: PK UUID; имя уникально только в рамках `user_id`.
-    - При удалении профиля core должен решить сам: оставить тендеры с
-      «осиротевшим» `search_profile_id` или отвязать (SET NULL) — FK между
-      сервисами нет (разные БД).
+      у записи тендера (или в связке profile↔tender).
+    - `id` не меняется при UPDATE. При смене `eis_config` растёт
+      **`config_version`** (имя/описание без смены фильтров версию не трогают).
+
+    ## Актуализация списка тендеров (sync)
+    Сценарий: настроили поиск → в core лежит список A → изменили фильтры →
+    нужен список B (добавить новые, удалить устаревшие).
+
+    Рекомендуемый поток:
+    1. Worker берёт профиль (`id`, `config_version`, `eis_config` / `eis-url`).
+    2. Обходит ленту ЕИС, собирает полный snapshot хитов.
+    3. Шлёт в **zakupki-core** sync по `search_profile_id` + `config_version`
+       и массив `{reg_number, notice_url, law, ...}`.
+    4. Core для этого `search_profile_id`:
+       - **upsert** все пришедшие `reg_number`;
+       - **удаляет** тендеры профиля, которых нет в snapshot
+         (или отвязывает связь, если тендер общий на несколько профилей);
+       - сохраняет `synced_config_version = config_version`.
+    5. Повторный sync с тем же `config_version` идемпотентен.
+
+    Модель в core (предпочтительно): уникальность хита
+    `(search_profile_id, source_site, reg_number)` — список «привязан к запросу».
+    Тогда replace-set по профилю простой и безопасный.
+
+    Этот сервис каталог не хранит — только конфиг и версию для триггера sync.
 
     ## Как работать другим сервисам
     1. `POST /api/v1/auth/login` → получить `token`
-    2. Все защищённые методы: заголовок `Authorization: Bearer <token>`
-    3. `GET /api/v1/search-profiles` — список настроек пользователя
-    4. `GET /api/v1/search-profiles/{id}` — полный `eis_config`
-    5. `GET /api/v1/search-profiles/{id}/eis-url` — готовый URL/query для ЕИС
-    6. Найденные закупки → **zakupki-core** вместе с `search_profile_id = profile.id`
-
-    Этот сервис — auth + хранение поисковых конфигов + сборка URL. Каталог тендеров здесь не ведётся.
+    2. Bearer на защищённых методах
+    3. CRUD `/api/v1/search-profiles`, `.../eis-url`
+    4. Найденные закупки → **zakupki-core** с `search_profile_id` + `config_version`
 
     Демо-пользователь (миграции): `demo` / `demo`.
-  version: 0.1.0
+  version: 0.2.0
   contact:
     name: zakupki-platform
     url: https://github.com/rinat1313/zakupki-search
@@ -510,7 +524,17 @@ components:
 
     SearchProfile:
       type: object
-      required: [id, user_id, name, description, source, eis_config, enabled, created_at, updated_at]
+      required:
+        - id
+        - user_id
+        - name
+        - description
+        - source
+        - eis_config
+        - enabled
+        - config_version
+        - created_at
+        - updated_at
       properties:
         id:
           type: string
@@ -539,6 +563,14 @@ components:
           $ref: "#/components/schemas/EISSearchConfig"
         enabled:
           type: boolean
+        config_version:
+          type: integer
+          format: int64
+          description: |
+            Версия поисковых фильтров. Стартует с 1, +1 при реальном изменении
+            `eis_config`. Сигнал для worker/core пересинхронизировать список
+            тендеров этого профиля (добавить новые, удалить устаревшие).
+          example: 3
         created_at:
           type: string
           format: date-time
@@ -575,13 +607,17 @@ components:
 
     EisUrlResponse:
       type: object
-      required: [profile_id, name, url, query]
+      required: [profile_id, config_version, name, url, query]
       properties:
         profile_id:
           type: string
           format: uuid
           description: |
             То же, что `SearchProfile.id` — ключ для `zakupki-core.search_profile_id`.
+        config_version:
+          type: integer
+          format: int64
+          description: Версия фильтров; передать в sync core вместе со snapshot.
         name:
           type: string
         url:
@@ -596,21 +632,22 @@ components:
               type: string
           description: url.Values — карта query-параметров (значения как массивы строк)
 
-    # Контракт записи в zakupki-core (не endpoint этого сервиса).
+    # Контракт записи / sync в zakupki-core (не endpoint этого сервиса).
     CoreTenderLink:
       type: object
       description: |
         Минимальная связь тендера в zakupki-core с настройкой поиска.
-        Рекомендуемые поля каталога core.
       required: [search_profile_id, reg_number]
       properties:
         search_profile_id:
           type: string
           format: uuid
-          description: |
-            Копия `SearchProfile.id` из zakupki-search.
-            Не FK между БД — логическая ссылка между сервисами.
+          description: Копия `SearchProfile.id` из zakupki-search.
           example: 0fc449d6-4063-4681-b193-458999155279
+        config_version:
+          type: integer
+          format: int64
+          description: Версия конфига, на которой найден этот хит / выполнен sync.
         reg_number:
           type: string
           example: "0134300097526000797"
@@ -631,12 +668,42 @@ components:
         status:
           type: string
 
+    CoreProfileSyncRequest:
+      type: object
+      description: |
+        Рекомендуемый контракт sync в zakupki-core (реализуется там).
+        Полный snapshot результатов поиска для профиля: upsert + delete missing.
+      required: [search_profile_id, config_version, items]
+      properties:
+        search_profile_id:
+          type: string
+          format: uuid
+        config_version:
+          type: integer
+          format: int64
+          description: |
+            Версия из search. Если в core уже synced_config_version >= этой
+            и политика «только новее» — можно no-op (опционально).
+        items:
+          type: array
+          description: Полный актуальный список хитов (не дельта).
+          items:
+            $ref: "#/components/schemas/CoreTenderLink"
+      example:
+        search_profile_id: 0fc449d6-4063-4681-b193-458999155279
+        config_version: 3
+        items:
+          - search_profile_id: 0fc449d6-4063-4681-b193-458999155279
+            reg_number: "0134300097526000797"
+            law: "44"
+            notice_url: https://zakupki.gov.ru/epz/order/notice/ea20/view/common-info.html?regNumber=0134300097526000797
+
     ParserHandoffItem:
       allOf:
         - $ref: "#/components/schemas/CoreTenderLink"
       description: |
-        Handoff worker → core / parser. Обязателен `search_profile_id`,
-        чтобы каталог core знал исходный поисковый запрос.
+        Handoff worker → core. Для полной актуализации предпочтителен
+        `CoreProfileSyncRequest` (snapshot), а не точечные inserts.
 
 security:
   - bearerAuth: []

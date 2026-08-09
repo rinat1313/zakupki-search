@@ -166,10 +166,11 @@ func (s *Server) handleProfileEISURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"profile_id": p.ID,
-		"name":       p.Name,
-		"url":        p.EISConfig.ResultsURL(s.Cfg.EISBaseURL),
-		"query":      p.EISConfig.QueryValues(),
+		"profile_id":     p.ID,
+		"config_version": p.ConfigVersion,
+		"name":           p.Name,
+		"url":            p.EISConfig.ResultsURL(s.Cfg.EISBaseURL),
+		"query":          p.EISConfig.QueryValues(),
 	})
 }
 
