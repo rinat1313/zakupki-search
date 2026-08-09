@@ -54,7 +54,12 @@ go run ./cmd/search
 | POST | `/api/v1/searchers/{id}/run` | ЕИС → sync в core (`search_config_id`) |
 | GET | `/api/v1/searchers/{id}/tenders` | прокси списка из core |
 
-Env: `CORE_URL` (например `http://127.0.0.1:8080`) — без него UI покажет 0 тендеров.
+Env:
+
+- `CORE_URL` (например `http://127.0.0.1:8080`) — без него UI покажет 0 тендеров
+- на стороне **gateway**: `SEARCH_URL` → этот сервис (в Docker-сети platform: `http://search:8093`)
+
+Чтобы `SEARCH_URL` был уже прописан при `./up.sh` платформы (без ручного `export`), см. патч [`deploy/platform/`](deploy/platform/) для `zakupki-platform`.
 
 Legacy: `/api/v1/search-profiles` (+ `eis-url`).
 
