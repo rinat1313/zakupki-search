@@ -54,18 +54,24 @@ go run ./cmd/search
 | POST | `/api/v1/searchers/{id}/run` | ЕИС → sync в core (`search_config_id`) |
 | GET | `/api/v1/searchers/{id}/tenders` | прокси списка из core |
 
-Env: `CORE_URL` (например `http://127.0.0.1:8080`) — без него UI покажет 0 тендеров.
+Env:
 
-Legacy: `/api/v1/search-profiles` (+ `eis-url`).
+- `CORE_URL` (например `http://127.0.0.1:8080`) — **обязателен** для run и списка тендеров
+- на gateway: `SEARCH_URL` → этот сервис
+
+Сохранение фильтров в UI **не наполняет** БД. Нужен **Запуск** (`POST …/run`) → ЕИС → sync в core.  
+Если список пустой — см. [`deploy/AGENT_HANDOFF_TENDERS.md`](deploy/AGENT_HANDOFF_TENDERS.md).
+
+Legacy: `/api/v1/search-profiles` (+ `eis-url`, `…/run`).
 
 Токен: заголовок `Authorization: Bearer <token>` или cookie `session`.
 
 ### Интеграция с core / parser
 
-1. Взять профиль: `GET /api/v1/search-profiles/{id}` или готовый URL: `.../eis-url`
-2. Воркер обходит ленту ЕИС (ещё не в этом сервисе)
-3. Найденные закупки сохраняются в **zakupki-core** (каталог тендеров)
-4. `zakupki-parser` обогащает карточки по `reg_number` из core
+1. Сохранить профиль (фильтры) в search
+2. `POST /api/v1/searchers/{id}/run` — обход ЕИС + sync в core (`search_config_id`)
+3. Core upsert тендеров и ставит ingest job (сбор карточек / docs)
+4. UI читает `GET /api/v1/tenders?search_config_id=…` из core
 
 `zakupki-search` не хранит список закупок — только настройки поиска.
 
