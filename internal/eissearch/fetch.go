@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +17,14 @@ import (
 
 	"github.com/rinat1313/zakupki-search/internal/models"
 )
+
+// Official Minцифры roots (zakupki.gov.ru since 2026). Embedded so Docker/cwd paths cannot break TLS.
+//
+//go:embed certs/russian_trusted_root_ca.crt
+var embeddedRootCA []byte
+
+//go:embed certs/russian_trusted_sub_ca.crt
+var embeddedSubCA []byte
 
 var (
 	reRegHref = regexp.MustCompile(`(?i)href="([^"]*(?:regNumber|purchaseNoticeNumber)=([0-9]{10,25})[^"]*)"`)
@@ -31,7 +41,7 @@ type Hit struct {
 
 type Options struct {
 	BaseURL    string
-	CADir      string // directory with *.crt / *.pem (Минцифры Russian Trusted CA)
+	CADir      string // optional extra PEMs on disk
 	Insecure   bool   // EIS_TLS_INSECURE — last resort
 	HTTPClient *http.Client
 }
@@ -64,21 +74,30 @@ func newTransport(caDir string, insecure bool) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if insecure {
+		log.Printf("eissearch: TLS InsecureSkipVerify enabled (EIS_TLS_INSECURE)")
 		tlsCfg.InsecureSkipVerify = true
-	} else if pool := loadCAPool(caDir); pool != nil {
-		tlsCfg.RootCAs = pool
+	} else {
+		tlsCfg.RootCAs = loadCAPool(caDir)
 	}
 	t.TLSClientConfig = tlsCfg
 	return t
 }
 
-// loadCAPool = system roots + optional extra PEMs from caDir (Russian Trusted Root/Sub).
+// loadCAPool = system roots + embedded Minцифры CA + optional EIS_CA_DIR PEMs.
 func loadCAPool(caDir string) *x509.CertPool {
 	pool, err := x509.SystemCertPool()
 	if err != nil || pool == nil {
 		pool = x509.NewCertPool()
 	}
 	added := 0
+	for _, pem := range [][]byte{embeddedRootCA, embeddedSubCA} {
+		if len(pem) == 0 {
+			continue
+		}
+		if pool.AppendCertsFromPEM(pem) {
+			added++
+		}
+	}
 	for _, dir := range uniqueDirs(caDir) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -102,9 +121,7 @@ func loadCAPool(caDir string) *x509.CertPool {
 			}
 		}
 	}
-	if added == 0 && caDir == "" {
-		return nil // use default transport roots
-	}
+	log.Printf("eissearch: TLS trust pool ready (embedded/disk PEM certs loaded≈%d)", added)
 	return pool
 }
 
@@ -166,7 +183,6 @@ func (f *Fetcher) get(ctx context.Context, u string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Browser-like headers — ЕИС иногда режет «ботов».
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; zakupki-search/0.3; +https://github.com/rinat1313/zakupki-search)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")

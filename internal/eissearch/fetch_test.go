@@ -1,20 +1,23 @@
 package eissearch
 
 import (
-	"path/filepath"
-	"runtime"
+	"crypto/x509"
 	"testing"
 )
 
-func TestLoadCAPoolIncludesMintsifry(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("caller")
+func TestEmbeddedMintsifryCA(t *testing.T) {
+	if len(embeddedRootCA) == 0 || len(embeddedSubCA) == 0 {
+		t.Fatal("embedded CA PEM empty")
 	}
-	// internal/eissearch → repo root/certs
-	caDir := filepath.Join(filepath.Dir(file), "..", "..", "certs")
-	pool := loadCAPool(caDir)
-	if pool == nil {
-		t.Fatal("expected non-nil pool with certs/")
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(embeddedRootCA) {
+		t.Fatal("root CA not PEM")
+	}
+	if !pool.AppendCertsFromPEM(embeddedSubCA) {
+		t.Fatal("sub CA not PEM")
+	}
+	p2 := loadCAPool("")
+	if p2 == nil {
+		t.Fatal("loadCAPool nil")
 	}
 }
