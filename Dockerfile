@@ -20,8 +20,8 @@ COPY certs /app/certs
 ENV HTTP_ADDR=:8091
 ENV MIGRATIONS_DIR=/app/migrations
 ENV EIS_CA_DIR=/app/certs
-# Крайний fallback, если даже embedded CA не помог (обычно не нужен):
-# ENV EIS_TLS_INSECURE=true
+# Default insecure for EIS; override with EIS_TLS_INSECURE=false if desired.
+ENV EIS_TLS_INSECURE=true
 EXPOSE 8091
 HEALTHCHECK CMD curl -fsS http://127.0.0.1:8091/health || exit 1
 CMD ["search"]

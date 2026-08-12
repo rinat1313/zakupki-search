@@ -18,13 +18,18 @@ import (
 	"github.com/rinat1313/zakupki-search/internal/models"
 )
 
-// Official Minцифры roots (zakupki.gov.ru since 2026). Embedded so Docker/cwd paths cannot break TLS.
+// Minцифры RSA trust anchors for zakupki.gov.ru (since 2026).
+// Include both Sub CA generations — wrong intermediate yields:
+// "crypto/rsa: verification error" while verifying "Russian Trusted Sub CA".
 //
 //go:embed certs/russian_trusted_root_ca.crt
 var embeddedRootCA []byte
 
 //go:embed certs/russian_trusted_sub_ca.crt
 var embeddedSubCA []byte
+
+//go:embed certs/russian_trusted_sub_ca_2024.crt
+var embeddedSubCA2024 []byte
 
 var (
 	reRegHref = regexp.MustCompile(`(?i)href="([^"]*(?:regNumber|purchaseNoticeNumber)=([0-9]{10,25})[^"]*)"`)
@@ -42,7 +47,7 @@ type Hit struct {
 type Options struct {
 	BaseURL    string
 	CADir      string // optional extra PEMs on disk
-	Insecure   bool   // EIS_TLS_INSECURE — last resort
+	Insecure   bool   // EIS_TLS_INSECURE — skip verify (GOST chains / broken intermediates)
 	HTTPClient *http.Client
 }
 
@@ -74,7 +79,7 @@ func newTransport(caDir string, insecure bool) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if insecure {
-		log.Printf("eissearch: TLS InsecureSkipVerify enabled (EIS_TLS_INSECURE)")
+		log.Printf("eissearch: TLS InsecureSkipVerify=true (EIS_TLS_INSECURE)")
 		tlsCfg.InsecureSkipVerify = true
 	} else {
 		tlsCfg.RootCAs = loadCAPool(caDir)
@@ -83,14 +88,13 @@ func newTransport(caDir string, insecure bool) *http.Transport {
 	return t
 }
 
-// loadCAPool = system roots + embedded Minцифры CA + optional EIS_CA_DIR PEMs.
 func loadCAPool(caDir string) *x509.CertPool {
 	pool, err := x509.SystemCertPool()
 	if err != nil || pool == nil {
 		pool = x509.NewCertPool()
 	}
 	added := 0
-	for _, pem := range [][]byte{embeddedRootCA, embeddedSubCA} {
+	for _, pem := range [][]byte{embeddedRootCA, embeddedSubCA, embeddedSubCA2024} {
 		if len(pem) == 0 {
 			continue
 		}
@@ -121,7 +125,7 @@ func loadCAPool(caDir string) *x509.CertPool {
 			}
 		}
 	}
-	log.Printf("eissearch: TLS trust pool ready (embedded/disk PEM certs loaded≈%d)", added)
+	log.Printf("eissearch: TLS trust pool ready (PEM certs loaded≈%d, incl. Sub CA 2024)", added)
 	return pool
 }
 
@@ -143,7 +147,6 @@ func uniqueDirs(caDir string) []string {
 	return out
 }
 
-// FetchFirstPages loads up to maxPages of EIS search results and extracts hits.
 func (f *Fetcher) FetchFirstPages(ctx context.Context, cfg models.SearcherConfig, maxPages int) ([]Hit, error) {
 	if maxPages < 1 {
 		maxPages = 1

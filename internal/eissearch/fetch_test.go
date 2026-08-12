@@ -6,18 +6,16 @@ import (
 )
 
 func TestEmbeddedMintsifryCA(t *testing.T) {
-	if len(embeddedRootCA) == 0 || len(embeddedSubCA) == 0 {
+	if len(embeddedRootCA) == 0 || len(embeddedSubCA) == 0 || len(embeddedSubCA2024) == 0 {
 		t.Fatal("embedded CA PEM empty")
 	}
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(embeddedRootCA) {
-		t.Fatal("root CA not PEM")
+	for i, pem := range [][]byte{embeddedRootCA, embeddedSubCA, embeddedSubCA2024} {
+		if !pool.AppendCertsFromPEM(pem) {
+			t.Fatalf("PEM %d not accepted", i)
+		}
 	}
-	if !pool.AppendCertsFromPEM(embeddedSubCA) {
-		t.Fatal("sub CA not PEM")
-	}
-	p2 := loadCAPool("")
-	if p2 == nil {
+	if p := loadCAPool(""); p == nil {
 		t.Fatal("loadCAPool nil")
 	}
 }

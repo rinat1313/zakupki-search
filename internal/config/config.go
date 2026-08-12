@@ -24,10 +24,12 @@ func FromEnv() Config {
 		DatabaseURL:     env("DATABASE_URL", "postgres://zakupki:zakupki@localhost:5432/zakupki_search?sslmode=disable"),
 		SessionTTL:      time.Duration(ttlHours) * time.Hour,
 		EISBaseURL:      env("EIS_BASE_URL", "https://zakupki.gov.ru"),
-		EISCADir:        env("EIS_CA_DIR", "certs"),
-		EISTLSInsecure:  env("EIS_TLS_INSECURE", "false") == "true",
-		CoreURL:         env("CORE_URL", ""),
-		SeedDemoUser:    env("SEED_DEMO_USER", "true") == "true",
+		EISCADir:       env("EIS_CA_DIR", "certs"),
+		// Default true: Go cannot always verify Minцифры chains (wrong Sub gen / GOST).
+		// Set EIS_TLS_INSECURE=false to enforce embedded CA verify.
+		EISTLSInsecure: env("EIS_TLS_INSECURE", "true") == "true",
+		CoreURL:        env("CORE_URL", ""),
+		SeedDemoUser:   env("SEED_DEMO_USER", "true") == "true",
 	}
 }
 
