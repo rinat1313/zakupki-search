@@ -2,9 +2,13 @@ package eissearch
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -25,20 +29,101 @@ type Hit struct {
 	ObjectName string
 }
 
+type Options struct {
+	BaseURL    string
+	CADir      string // directory with *.crt / *.pem (Минцифры Russian Trusted CA)
+	Insecure   bool   // EIS_TLS_INSECURE — last resort
+	HTTPClient *http.Client
+}
+
 type Fetcher struct {
 	BaseURL string
 	HTTP    *http.Client
 }
 
 func New(baseURL string) *Fetcher {
-	baseURL = strings.TrimRight(baseURL, "/")
+	return NewWithOptions(Options{BaseURL: baseURL})
+}
+
+func NewWithOptions(opt Options) *Fetcher {
+	baseURL := strings.TrimRight(opt.BaseURL, "/")
 	if baseURL == "" {
 		baseURL = "https://zakupki.gov.ru"
 	}
-	return &Fetcher{
-		BaseURL: baseURL,
-		HTTP:    &http.Client{Timeout: 45 * time.Second},
+	client := opt.HTTPClient
+	if client == nil {
+		client = &http.Client{
+			Timeout:   45 * time.Second,
+			Transport: newTransport(opt.CADir, opt.Insecure),
+		}
 	}
+	return &Fetcher{BaseURL: baseURL, HTTP: client}
+}
+
+func newTransport(caDir string, insecure bool) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if insecure {
+		tlsCfg.InsecureSkipVerify = true
+	} else if pool := loadCAPool(caDir); pool != nil {
+		tlsCfg.RootCAs = pool
+	}
+	t.TLSClientConfig = tlsCfg
+	return t
+}
+
+// loadCAPool = system roots + optional extra PEMs from caDir (Russian Trusted Root/Sub).
+func loadCAPool(caDir string) *x509.CertPool {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	added := 0
+	for _, dir := range uniqueDirs(caDir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			low := strings.ToLower(name)
+			if !strings.HasSuffix(low, ".crt") && !strings.HasSuffix(low, ".pem") && !strings.HasSuffix(low, ".cer") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				continue
+			}
+			if pool.AppendCertsFromPEM(b) {
+				added++
+			}
+		}
+	}
+	if added == 0 && caDir == "" {
+		return nil // use default transport roots
+	}
+	return pool
+}
+
+func uniqueDirs(caDir string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(d string) {
+		d = strings.TrimSpace(d)
+		if d == "" || seen[d] {
+			return
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	add(caDir)
+	add(os.Getenv("EIS_CA_DIR"))
+	add("certs")
+	add("/app/certs")
+	return out
 }
 
 // FetchFirstPages loads up to maxPages of EIS search results and extracts hits.
@@ -81,8 +166,10 @@ func (f *Fetcher) get(ctx context.Context, u string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "zakupki-search/0.2")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	// Browser-like headers — ЕИС иногда режет «ботов».
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; zakupki-search/0.3; +https://github.com/rinat1313/zakupki-search)")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.8")
 	res, err := f.HTTP.Do(req)
 	if err != nil {
 		return "", err
@@ -101,7 +188,6 @@ func (f *Fetcher) get(ctx context.Context, u string) (string, error) {
 func parseHits(html, base string) []Hit {
 	blocks := strings.Split(html, "search-registry-entry-block")
 	if len(blocks) < 2 {
-		// fallback: global regex
 		return parseHitsGlobal(html, base)
 	}
 	var out []Hit

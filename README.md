@@ -26,8 +26,21 @@ curl -s http://localhost:8091/health
 
 ```bash
 export DATABASE_URL=postgres://zakupki:zakupki@localhost:5432/zakupki_search?sslmode=disable
+export EIS_CA_DIR=certs   # сертификаты Минцифры для zakupki.gov.ru
 go run ./cmd/search
 ```
+
+### TLS / ЕИС (важно с 2026)
+
+`zakupki.gov.ru` перешёл на CA Минцифры. В образе и в `certs/` лежат
+`russian_trusted_root_ca.crt` + `russian_trusted_sub_ca.crt`.
+
+| Env | Назначение |
+|-----|------------|
+| `EIS_CA_DIR` | каталог с PEM (`certs` / `/app/certs`) |
+| `EIS_TLS_INSECURE=true` | отключить проверку TLS (только fallback) |
+
+Без этого `POST …/run` падает с `x509: certificate signed by unknown authority`.
 
 ## Swagger / OpenAPI
 

@@ -49,7 +49,16 @@ func main() {
 	} else {
 		log.Printf("core client: disabled (set CORE_URL to enable tenders/sync)")
 	}
-	eis := eissearch.New(cfg.EISBaseURL)
+	eis := eissearch.NewWithOptions(eissearch.Options{
+		BaseURL:  cfg.EISBaseURL,
+		CADir:    cfg.EISCADir,
+		Insecure: cfg.EISTLSInsecure,
+	})
+	if cfg.EISTLSInsecure {
+		log.Printf("EIS TLS: INSECURE (EIS_TLS_INSECURE=true) — only for broken trust stores")
+	} else {
+		log.Printf("EIS TLS: CA dir %q (Минцифры Russian Trusted Root/Sub)", cfg.EISCADir)
+	}
 
 	api := httpapi.New(store, cfg, core, eis)
 	srv := &http.Server{

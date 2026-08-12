@@ -24,6 +24,8 @@ services:
       DATABASE_URL: postgres://zakupki:zakupki@postgres:5432/zakupki_search?sslmode=disable
       MIGRATIONS_DIR: /app/migrations
       EIS_BASE_URL: https://zakupki.gov.ru
+      EIS_CA_DIR: /app/certs
+      # fallback only if CA bundle missing: EIS_TLS_INSECURE=true
       CORE_URL: ${CORE_URL:-http://host.docker.internal:8080}
       SESSION_TTL_HOURS: "72"
     depends_on:
