@@ -53,6 +53,7 @@ func (s *Server) routes() {
 	s.Mux.HandleFunc("PUT /api/v1/search-profiles/{id}", s.requireAuth(s.handleUpdateProfile))
 	s.Mux.HandleFunc("DELETE /api/v1/search-profiles/{id}", s.requireAuth(s.handleDeleteProfile))
 	s.Mux.HandleFunc("GET /api/v1/search-profiles/{id}/eis-url", s.requireAuth(s.handleProfileEISURL))
+	s.Mux.HandleFunc("POST /api/v1/search-profiles/{id}/run", s.requireAuth(s.handleRunSearcher))
 
 	// Gateway UI contract (searchers.js)
 	s.Mux.HandleFunc("GET /api/v1/searchers", s.requireAuth(s.handleListSearchers))

@@ -1,0 +1,78 @@
+diff --git a/ui/searchers.js b/ui/searchers.js
+index 313a3ac..4a8c524 100644
+--- a/ui/searchers.js
++++ b/ui/searchers.js
+@@ -434,7 +434,7 @@
+     showMain("editor");
+   }
+ 
+-  async function saveEditor({ showEisUrl } = {}) {
++  async function saveEditor({ run } = {}) {
+     const status = $("#sr-status");
+     try {
+       const body = readEditor();
+@@ -478,8 +478,8 @@
+       await loadProfiles();
+       if (id) {
+         state.activeId = id;
+-        if (showEisUrl) await showEisUrlFor(id);
+         await selectProfile(id);
++        if (run) await runSearcher(id);
+       } else {
+         showMain("empty");
+       }
+@@ -490,14 +490,34 @@
+     }
+   }
+ 
++  async function runSearcher(id) {
++    try {
++      // Prefer gateway UI contract (/searchers); fall back to legacy profiles path.
++      let res;
++      try {
++        res = await api(`/searchers/${id}/run`, { method: "POST", body: "{}" });
++      } catch (err) {
++        if (err.status !== 404) throw err;
++        res = await api(`/search-profiles/${id}/run`, { method: "POST", body: "{}" });
++      }
++      const found = res?.found_count ?? 0;
++      const msg = res?.message || (res?.status === "error" ? "Ошибка запуска" : "Запуск выполнен");
++      alert(`${msg}\n\nНайдено: ${found}\nstatus: ${res?.status || "—"}\nrun_id: ${res?.run_id || "—"}`);
++      await loadTenders();
++      await loadProfiles();
++    } catch (err) {
++      alert("Запуск поиска: " + err.message);
++    }
++  }
++
+   async function showEisUrlFor(id) {
+     try {
+       const data = await api(`/search-profiles/${id}/eis-url`);
+       const url = data?.url || "";
+       alert(
+-        "URL поиска ЕИС (worker забирает профиль по id):\n\n" +
++        "URL поиска ЕИС:\n\n" +
+         url +
+-        `\n\nprofile_id: ${data?.profile_id || id}` +
++        `\n\nprofile_id / search_config_id: ${data?.profile_id || id}` +
+         `\nconfig_version: ${data?.config_version ?? "—"}`
+       );
+     } catch (err) {
+@@ -603,7 +623,7 @@
+     $("#btn-searcher-new")?.addEventListener("click", () => openEditor(null));
+     $("#btn-searcher-new-empty")?.addEventListener("click", () => openEditor(null));
+     $("#btn-searcher-edit")?.addEventListener("click", () => openEditor(state.activeId));
+-    $("#btn-searcher-run")?.addEventListener("click", () => state.activeId && showEisUrlFor(state.activeId));
++    $("#btn-searcher-run")?.addEventListener("click", () => state.activeId && runSearcher(state.activeId));
+     $("#btn-searcher-del")?.addEventListener("click", deleteActive);
+     $("#searcher-auto-ai")?.addEventListener("change", (e) => setAutoAI(e.target.checked));
+     $("#searcher-tenders-q")?.addEventListener("input", () => {
+@@ -615,7 +635,7 @@
+       else showMain("empty");
+     });
+     $("#sr-save")?.addEventListener("click", () => saveEditor());
+-    $("#sr-save-run")?.addEventListener("click", () => saveEditor({ showEisUrl: true }));
++    $("#sr-save-run")?.addEventListener("click", () => saveEditor({ run: true }));
+   }
+ 
+   window.ZakupkiSearchers = { enterSearchersView, renderAuthChrome, stopPolling };

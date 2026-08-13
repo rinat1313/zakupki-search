@@ -1,0 +1,369 @@
+diff --git a/internal/httpapi/server.go b/internal/httpapi/server.go
+index b67c3d9..0498493 100644
+--- a/internal/httpapi/server.go
++++ b/internal/httpapi/server.go
+@@ -38,6 +38,8 @@ func (s *Server) routes() {
+ 	s.Mux.HandleFunc("GET /api/v1/health", s.health)
+ 	s.Mux.HandleFunc("GET /api/v1/categories", s.listCategories)
+ 	s.Mux.HandleFunc("POST /api/v1/categories", s.createCategory)
++	s.Mux.HandleFunc("GET /api/v1/categories/by-search-config/{id}", s.getCategoryBySearchConfig)
++	s.Mux.HandleFunc("POST /api/v1/categories/by-search-config/{id}/sync", s.syncBySearchConfig)
+ 	s.Mux.HandleFunc("GET /api/v1/categories/{slug}", s.getCategory)
+ 	s.Mux.HandleFunc("DELETE /api/v1/categories/{slug}/tenders", s.clearCategoryTenders)
+ 	s.Mux.HandleFunc("DELETE /api/v1/categories/{slug}/jobs", s.clearCategoryJobs)
+@@ -110,14 +112,24 @@ func (s *Server) listCategories(w http.ResponseWriter, r *http.Request) {
+ 
+ func (s *Server) createCategory(w http.ResponseWriter, r *http.Request) {
+ 	var body struct {
+-		Title string `json:"title"`
+-		Slug  string `json:"slug"`
++		Title          string `json:"title"`
++		Slug           string `json:"slug"`
++		SearchConfigID string `json:"search_config_id"`
+ 	}
+ 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+ 		writeErr(w, err)
+ 		return
+ 	}
+-	c, err := s.Store.CreateCategory(r.Context(), body.Title, body.Slug)
++	var searchID *uuid.UUID
++	if strings.TrimSpace(body.SearchConfigID) != "" {
++		id, err := uuid.Parse(strings.TrimSpace(body.SearchConfigID))
++		if err != nil {
++			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid search_config_id"})
++			return
++		}
++		searchID = &id
++	}
++	c, err := s.Store.CreateCategoryWithSearchConfig(r.Context(), body.Title, body.Slug, searchID)
+ 	if err != nil {
+ 		writeErr(w, err)
+ 		return
+@@ -125,6 +137,50 @@ func (s *Server) createCategory(w http.ResponseWriter, r *http.Request) {
+ 	writeJSON(w, http.StatusCreated, c)
+ }
+ 
++func (s *Server) getCategoryBySearchConfig(w http.ResponseWriter, r *http.Request) {
++	id, err := uuid.Parse(r.PathValue("id"))
++	if err != nil {
++		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid search_config_id"})
++		return
++	}
++	c, err := s.Store.GetCategoryBySearchConfigID(r.Context(), id)
++	if err != nil {
++		writeErr(w, err)
++		return
++	}
++	writeJSON(w, http.StatusOK, c)
++}
++
++func (s *Server) syncBySearchConfig(w http.ResponseWriter, r *http.Request) {
++	id, err := uuid.Parse(r.PathValue("id"))
++	if err != nil {
++		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid search_config_id"})
++		return
++	}
++	var body struct {
++		Title         string                 `json:"title"`
++		ConfigVersion int64                  `json:"config_version"`
++		Items         []store.SearchSyncItem `json:"items"`
++		Enqueue       bool                   `json:"enqueue"`
++	}
++	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++		writeErr(w, err)
++		return
++	}
++	title := strings.TrimSpace(body.Title)
++	if title == "" {
++		title = "search-" + id.String()[:8]
++	}
++	// Resume ingest worker if it was stopped — sync is meant to collect cards.
++	s.Control.ResumeIngest()
++	res, err := s.Store.SyncSearchConfig(r.Context(), id, title, body.ConfigVersion, body.Items, body.Enqueue)
++	if err != nil {
++		writeErr(w, err)
++		return
++	}
++	writeJSON(w, http.StatusOK, res)
++}
++
+ func (s *Server) getCategory(w http.ResponseWriter, r *http.Request) {
+ 	c, err := s.Store.GetCategoryBySlug(r.Context(), r.PathValue("slug"))
+ 	if err != nil {
+@@ -313,7 +369,7 @@ func (s *Server) ingestStats(w http.ResponseWriter, r *http.Request) {
+ 
+ func (s *Server) listTenders(w http.ResponseWriter, r *http.Request) {
+ 	q := r.URL.Query()
+-	list, err := s.Store.ListTenders(r.Context(), q.Get("category"), q.Get("q"), q.Get("status"), 500)
++	list, err := s.Store.ListTendersFiltered(r.Context(), q.Get("category"), q.Get("search_config_id"), q.Get("q"), q.Get("status"), 500)
+ 	if err != nil {
+ 		writeErr(w, err)
+ 		return
+diff --git a/internal/store/db.go b/internal/store/db.go
+index c06ebc8..3d9c308 100644
+--- a/internal/store/db.go
++++ b/internal/store/db.go
+@@ -68,6 +68,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+ 		  UNIQUE (category_id, name)
+ 		)`,
+ 		`ALTER TABLE categories ADD COLUMN IF NOT EXISTS active_ai_config_id UUID`,
++		`ALTER TABLE categories ADD COLUMN IF NOT EXISTS search_config_id UUID`,
++		`ALTER TABLE categories ADD COLUMN IF NOT EXISTS synced_config_version BIGINT NOT NULL DEFAULT 0`,
++		`CREATE UNIQUE INDEX IF NOT EXISTS categories_search_config_id_uidx
++		   ON categories(search_config_id) WHERE search_config_id IS NOT NULL`,
+ 		`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS collect_pct INT NOT NULL DEFAULT 0`,
+ 		`ALTER TABLE tenders ADD COLUMN IF NOT EXISTS ai_pct INT NOT NULL DEFAULT 0`,
+ 	}
+diff --git a/internal/store/models.go b/internal/store/models.go
+index 536bc53..2372c21 100644
+--- a/internal/store/models.go
++++ b/internal/store/models.go
+@@ -16,11 +16,13 @@ import (
+ var ErrNotFound = errors.New("not found")
+ 
+ type Category struct {
+-	ID               uuid.UUID  `json:"id"`
+-	Slug             string     `json:"slug"`
+-	Title            string     `json:"title"`
+-	ActiveAIConfigID *uuid.UUID `json:"active_ai_config_id,omitempty"`
+-	CreatedAt        time.Time  `json:"created_at"`
++	ID                  uuid.UUID  `json:"id"`
++	Slug                string     `json:"slug"`
++	Title               string     `json:"title"`
++	SearchConfigID      *uuid.UUID `json:"search_config_id,omitempty"`
++	SyncedConfigVersion int64      `json:"synced_config_version,omitempty"`
++	ActiveAIConfigID    *uuid.UUID `json:"active_ai_config_id,omitempty"`
++	CreatedAt           time.Time  `json:"created_at"`
+ }
+ 
+ type Customer struct {
+@@ -156,16 +158,24 @@ func slugify(title string) string {
+ 	return out
+ }
+ 
++const categoryCols = `id, slug, title, search_config_id, synced_config_version, active_ai_config_id, created_at`
++
++func scanCategory(scan func(dest ...any) error) (Category, error) {
++	var c Category
++	err := scan(&c.ID, &c.Slug, &c.Title, &c.SearchConfigID, &c.SyncedConfigVersion, &c.ActiveAIConfigID, &c.CreatedAt)
++	return c, err
++}
++
+ func (s *Store) ListCategories(ctx context.Context) ([]Category, error) {
+-	rows, err := s.Pool.Query(ctx, `SELECT id, slug, title, active_ai_config_id, created_at FROM categories ORDER BY title`)
++	rows, err := s.Pool.Query(ctx, `SELECT `+categoryCols+` FROM categories ORDER BY title`)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	defer rows.Close()
+ 	var out []Category
+ 	for rows.Next() {
+-		var c Category
+-		if err := rows.Scan(&c.ID, &c.Slug, &c.Title, &c.ActiveAIConfigID, &c.CreatedAt); err != nil {
++		c, err := scanCategory(rows.Scan)
++		if err != nil {
+ 			return nil, err
+ 		}
+ 		out = append(out, c)
+@@ -174,9 +184,19 @@ func (s *Store) ListCategories(ctx context.Context) ([]Category, error) {
+ }
+ 
+ func (s *Store) GetCategoryBySlug(ctx context.Context, slug string) (*Category, error) {
+-	var c Category
+-	err := s.Pool.QueryRow(ctx, `SELECT id, slug, title, active_ai_config_id, created_at FROM categories WHERE slug=$1`, slug).
+-		Scan(&c.ID, &c.Slug, &c.Title, &c.ActiveAIConfigID, &c.CreatedAt)
++	c, err := scanCategory(s.Pool.QueryRow(ctx, `SELECT `+categoryCols+` FROM categories WHERE slug=$1`, slug).Scan)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return nil, ErrNotFound
++	}
++	if err != nil {
++		return nil, err
++	}
++	return &c, nil
++}
++
++func (s *Store) GetCategoryBySearchConfigID(ctx context.Context, searchConfigID uuid.UUID) (*Category, error) {
++	c, err := scanCategory(s.Pool.QueryRow(ctx,
++		`SELECT `+categoryCols+` FROM categories WHERE search_config_id=$1`, searchConfigID).Scan)
+ 	if errors.Is(err, pgx.ErrNoRows) {
+ 		return nil, ErrNotFound
+ 	}
+@@ -187,25 +207,49 @@ func (s *Store) GetCategoryBySlug(ctx context.Context, slug string) (*Category,
+ }
+ 
+ func (s *Store) CreateCategory(ctx context.Context, title, slug string) (*Category, error) {
++	return s.CreateCategoryWithSearchConfig(ctx, title, slug, nil)
++}
++
++func (s *Store) CreateCategoryWithSearchConfig(ctx context.Context, title, slug string, searchConfigID *uuid.UUID) (*Category, error) {
+ 	title = strings.TrimSpace(title)
+ 	if title == "" {
+ 		return nil, fmt.Errorf("title required")
+ 	}
+ 	if slug == "" {
+-		slug = slugify(title)
++		if searchConfigID != nil {
++			slug = "search-" + strings.ReplaceAll(searchConfigID.String(), "-", "")[:12]
++		} else {
++			slug = slugify(title)
++		}
++	}
++	if searchConfigID != nil {
++		if existing, err := s.GetCategoryBySearchConfigID(ctx, *searchConfigID); err == nil {
++			// Keep title in sync with searcher name.
++			_, _ = s.Pool.Exec(ctx, `UPDATE categories SET title=$2 WHERE id=$1`, existing.ID, title)
++			existing.Title = title
++			return existing, nil
++		} else if !errors.Is(err, ErrNotFound) {
++			return nil, err
++		}
+ 	}
+ 	var c Category
+ 	err := s.Pool.QueryRow(ctx,
+-		`INSERT INTO categories(slug, title) VALUES($1,$2)
+-		 ON CONFLICT (slug) DO UPDATE SET title=EXCLUDED.title
+-		 RETURNING id, slug, title, active_ai_config_id, created_at`, slug, title).
+-		Scan(&c.ID, &c.Slug, &c.Title, &c.ActiveAIConfigID, &c.CreatedAt)
++		`INSERT INTO categories(slug, title, search_config_id) VALUES($1,$2,$3)
++		 ON CONFLICT (slug) DO UPDATE SET
++		   title=EXCLUDED.title,
++		   search_config_id=COALESCE(categories.search_config_id, EXCLUDED.search_config_id)
++		 RETURNING `+categoryCols, slug, title, searchConfigID).
++		Scan(&c.ID, &c.Slug, &c.Title, &c.SearchConfigID, &c.SyncedConfigVersion, &c.ActiveAIConfigID, &c.CreatedAt)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	return &c, nil
+ }
+ 
++func (s *Store) EnsureCategoryForSearchConfig(ctx context.Context, searchConfigID uuid.UUID, title string) (*Category, error) {
++	return s.CreateCategoryWithSearchConfig(ctx, title, "", &searchConfigID)
++}
++
+ func (s *Store) UpsertCustomer(ctx context.Context, c Customer) (*Customer, error) {
+ 	if c.Payload == nil {
+ 		c.Payload = json.RawMessage(`{}`)
+diff --git a/internal/store/search_sync.go b/internal/store/search_sync.go
+new file mode 100644
+index 0000000..7399895
+--- /dev/null
++++ b/internal/store/search_sync.go
+@@ -0,0 +1,87 @@
++package store
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"strings"
++
++	"github.com/google/uuid"
++)
++
++// SearchSyncItem — минимальный хит из zakupki-search / EIS.
++type SearchSyncItem struct {
++	RegNumber  string `json:"reg_number"`
++	SourceSite string `json:"source_site,omitempty"`
++	NoticeURL  string `json:"notice_url,omitempty"`
++	Law        string `json:"law,omitempty"`
++	ObjectName string `json:"object_name,omitempty"`
++}
++
++type SearchSyncResult struct {
++	CategoryID   uuid.UUID  `json:"category_id"`
++	Upserted     int        `json:"upserted"`
++	Enqueued     int        `json:"enqueued"`
++	JobID        *uuid.UUID `json:"job_id,omitempty"`
++	ConfigVersion int64     `json:"config_version"`
++}
++
++// SyncSearchConfig upserts tenders for a searcher category and optionally enqueues ingest.
++func (s *Store) SyncSearchConfig(ctx context.Context, searchConfigID uuid.UUID, title string, configVersion int64, items []SearchSyncItem, enqueue bool) (*SearchSyncResult, error) {
++	cat, err := s.EnsureCategoryForSearchConfig(ctx, searchConfigID, title)
++	if err != nil {
++		return nil, err
++	}
++
++	upserted := 0
++	ingestItems := make([]struct{ Reg, Site string }, 0, len(items))
++	for _, it := range items {
++		reg := strings.TrimSpace(it.RegNumber)
++		if reg == "" {
++			continue
++		}
++		site := strings.TrimSpace(it.SourceSite)
++		if site == "" {
++			site = "https://zakupki.gov.ru"
++		}
++		payload := json.RawMessage(`{}`)
++		if strings.TrimSpace(it.NoticeURL) != "" {
++			b, _ := json.Marshal(map[string]any{"notice_url": it.NoticeURL, "search_config_id": searchConfigID.String()})
++			payload = b
++		}
++		_, _, err := s.UpsertTender(ctx, TenderUpsertInput{
++			RegNumber:  reg,
++			SourceSite: site,
++			Law:        it.Law,
++			ObjectName: it.ObjectName,
++			Payload:    payload,
++			CategoryID: cat.ID,
++		})
++		if err != nil {
++			return nil, fmt.Errorf("upsert %s: %w", reg, err)
++		}
++		upserted++
++		ingestItems = append(ingestItems, struct{ Reg, Site string }{Reg: reg, Site: site})
++	}
++
++	if configVersion > 0 {
++		_, _ = s.Pool.Exec(ctx,
++			`UPDATE categories SET synced_config_version=$2 WHERE id=$1`,
++			cat.ID, configVersion)
++	}
++
++	out := &SearchSyncResult{
++		CategoryID:    cat.ID,
++		Upserted:      upserted,
++		ConfigVersion: configVersion,
++	}
++	if enqueue && len(ingestItems) > 0 {
++		job, err := s.CreateIngestJob(ctx, cat.ID, "search-sync", ingestItems)
++		if err != nil {
++			return nil, fmt.Errorf("enqueue ingest: %w", err)
++		}
++		out.Enqueued = len(ingestItems)
++		out.JobID = &job.ID
++	}
++	return out, nil
++}
+diff --git a/internal/store/tenders.go b/internal/store/tenders.go
+index 0f37947..6446719 100644
+--- a/internal/store/tenders.go
++++ b/internal/store/tenders.go
+@@ -13,6 +13,10 @@ import (
+ )
+ 
+ func (s *Store) ListTenders(ctx context.Context, categorySlug, q, status string, limit int) ([]Tender, error) {
++	return s.ListTendersFiltered(ctx, categorySlug, "", q, status, limit)
++}
++
++func (s *Store) ListTendersFiltered(ctx context.Context, categorySlug, searchConfigID, q, status string, limit int) ([]Tender, error) {
+ 	if limit <= 0 || limit > 1000 {
+ 		limit = 200
+ 	}
+@@ -34,11 +38,12 @@ func (s *Store) ListTenders(ctx context.Context, categorySlug, q, status string,
+ 		LEFT JOIN categories c ON c.id=tc.category_id
+ 		LEFT JOIN tender_assessments a ON a.tender_id=t.id
+ 		WHERE ($1='' OR c.slug=$1)
+-		  AND ($2='' OR t.reg_number ILIKE '%'||$2||'%' OR t.object_name ILIKE '%'||$2||'%')
+-		  AND ($3='' OR t.analysis_status::text=$3)
++		  AND ($2='' OR c.search_config_id::text=$2)
++		  AND ($3='' OR t.reg_number ILIKE '%'||$3||'%' OR t.object_name ILIKE '%'||$3||'%')
++		  AND ($4='' OR t.analysis_status::text=$4)
+ 		GROUP BY t.id, a.score, a.details
+ 		ORDER BY t.application_end NULLS LAST, t.updated_at DESC
+-		LIMIT $4`, categorySlug, strings.TrimSpace(q), strings.TrimSpace(status), limit)
++		LIMIT $5`, categorySlug, strings.TrimSpace(searchConfigID), strings.TrimSpace(q), strings.TrimSpace(status), limit)
+ 	if err != nil {
+ 		return nil, err
+ 	}

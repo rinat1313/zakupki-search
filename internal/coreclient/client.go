@@ -40,15 +40,22 @@ type SyncItem struct {
 }
 
 type SyncRequest struct {
-	Items   []SyncItem `json:"items"`
-	Enqueue bool       `json:"enqueue"`
+	Title         string     `json:"title,omitempty"`
+	ConfigVersion int64      `json:"config_version,omitempty"`
+	Items         []SyncItem `json:"items"`
+	Enqueue       bool       `json:"enqueue"`
 }
 
-func (c *Client) SyncSearchConfig(ctx context.Context, searchConfigID string, items []SyncItem, enqueue bool) error {
+func (c *Client) SyncSearchConfig(ctx context.Context, searchConfigID, title string, configVersion int64, items []SyncItem, enqueue bool) error {
 	if !c.Enabled() {
 		return fmt.Errorf("core client disabled")
 	}
-	body, _ := json.Marshal(SyncRequest{Items: items, Enqueue: enqueue})
+	body, _ := json.Marshal(SyncRequest{
+		Title:         title,
+		ConfigVersion: configVersion,
+		Items:         items,
+		Enqueue:       enqueue,
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.BaseURL+"/api/v1/categories/by-search-config/"+url.PathEscape(searchConfigID)+"/sync",
 		bytes.NewReader(body))
