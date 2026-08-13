@@ -1,0 +1,55 @@
+diff --git a/.env.example b/.env.example
+index dc0a6aa..c0cf1eb 100644
+--- a/.env.example
++++ b/.env.example
+@@ -17,8 +17,9 @@
+ # SIBLING_BRANCH=main
+ # ZAKUPKI_SKIP_SIBLING_SYNC=1
+ #
+-# CORE_URL для search→core sync задаётся в compose автоматически.
+-# (search использует отдельную БД postgres://…/zakupki_search)
++# CORE_URL для search→core sync и SEARCH_URL для gateway→search
++# задаются в docker-compose.search.yml автоматически.
++# (search: :8093, БД postgres://…/zakupki_search)
+ #
+ # LM Studio / dose / чек-листы настраиваются в analizator_zakupok
+ # (configs/, Dockerfile ENV), а не здесь.
+diff --git a/docker-compose.host.yml b/docker-compose.host.yml
+index 57c86c9..75d75c0 100644
+--- a/docker-compose.host.yml
++++ b/docker-compose.host.yml
+@@ -29,6 +29,8 @@ services:
+       HTTP_ADDR: ":3000"
+       CORE_URL: http://127.0.0.1:8080
+       CUSTOMER_URL: http://127.0.0.1:8092
++      # Перекрывает SEARCH_URL из docker-compose.search.yml (там http://search:8093).
++      SEARCH_URL: http://127.0.0.1:8093
+       UI_DIR: /app/ui
+     depends_on:
+       - core
+diff --git a/docker-compose.search.yml b/docker-compose.search.yml
+index 541247c..b86300d 100644
+--- a/docker-compose.search.yml
++++ b/docker-compose.search.yml
+@@ -1,6 +1,8 @@
+ # Подключается из ./up.sh, если рядом есть sibling zakupki-search.
+ # Сервис: поисковые профили ЕИС (своя БД zakupki_search, миграции внутри образа).
+ # Порт платформы :8093 (в репо search дефолт :8091 — конфликтует с parser).
++#
++# Gateway получает SEARCH_URL → проксирует auth / searchers в zakupki-search.
+ 
+ services:
+   search:
+@@ -26,5 +28,10 @@ services:
+       timeout: 5s
+       retries: 15
+ 
+-  # gateway пока не проксирует search (нет SEARCH_URL в коде gateway);
+-  # UI/клиенты ходят на :8093 напрямую (CORS включён в search).
++  # Override gateway из docker-compose.yml: раздел «Поисковики» в UI.
++  gateway:
++    environment:
++      SEARCH_URL: http://search:8093
++    depends_on:
++      search:
++        condition: service_started

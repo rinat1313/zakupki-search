@@ -32,13 +32,12 @@ go run ./cmd/search
 
 ### TLS / ЕИС (важно с 2026)
 
-`zakupki.gov.ru` перешёл на CA Минцифры. В образе и в `certs/` лежат
-`russian_trusted_root_ca.crt` + `russian_trusted_sub_ca.crt`.
+`zakupki.gov.ru` перешёл на CA Минцифры. В образе и в `certs/` лежат Root + Sub CA 2022/2024.
 
 | Env | Назначение |
 |-----|------------|
 | `EIS_CA_DIR` | каталог с PEM (`certs` / `/app/certs`) |
-| `EIS_TLS_INSECURE=true` | отключить проверку TLS (только fallback) |
+| `EIS_TLS_INSECURE` | по умолчанию `true` — fallback для цепочек Минцифры/ГОСТ |
 
 Без этого `POST …/run` падает с `x509: certificate signed by unknown authority`.
 
@@ -70,7 +69,9 @@ go run ./cmd/search
 Env:
 
 - `CORE_URL` (например `http://127.0.0.1:8080`) — **обязателен** для run и списка тендеров
-- на gateway: `SEARCH_URL` → этот сервис
+- на gateway: `SEARCH_URL` → этот сервис (в Docker-сети platform: `http://search:8093`)
+
+Чтобы `SEARCH_URL` был уже прописан при `./up.sh` платформы, см. [`deploy/platform/`](deploy/platform/).
 
 Сохранение фильтров в UI **не наполняет** БД. Нужен **Запуск** (`POST …/run`) → ЕИС → sync в core.  
 Если список пустой — см. [`deploy/AGENT_HANDOFF_TENDERS.md`](deploy/AGENT_HANDOFF_TENDERS.md).
