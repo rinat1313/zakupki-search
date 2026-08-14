@@ -83,7 +83,7 @@ Legacy: `/api/v1/search-profiles` (+ `eis-url`, `…/run`).
 ### Интеграция с core / parser
 
 1. Сохранить профиль (фильтры) в search
-2. `POST /api/v1/searchers/{id}/run` — обход ЕИС + sync в core (`search_config_id`)
+2. `POST /api/v1/searchers/{id}/run` — фоновый обход ЕИС (до 1000 стр. × 50, пауза 1 с) + sync каждой страницы в core
 3. Core upsert тендеров и ставит ingest job (сбор карточек / docs)
 4. UI читает `GET /api/v1/tenders?search_config_id=…` из core
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rinat1313/zakupki-search/docs"
@@ -22,6 +23,7 @@ type Server struct {
 	EIS    *eissearch.Fetcher
 	Mux    *http.ServeMux
 	logger *log.Logger
+	runs   sync.Map // searcherID → runID (in-flight crawl)
 }
 
 func New(store *db.Store, cfg config.Config, core *coreclient.Client, eis *eissearch.Fetcher) *Server {

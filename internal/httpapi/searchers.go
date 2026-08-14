@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rinat1313/zakupki-search/internal/coreclient"
 	"github.com/rinat1313/zakupki-search/internal/db"
+	"github.com/rinat1313/zakupki-search/internal/eissearch"
 	"github.com/rinat1313/zakupki-search/internal/models"
 )
 
@@ -256,54 +258,86 @@ func (s *Server) handleRunSearcher(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Synchronous first-pass fetch so UI gets found_count; remaining pages can expand later.
-	found := 0
-	msg := "Поиск выполнен. Тендеры записаны в zakupki-core и поставлены в очередь сбора."
-	status := "done"
 	if s.Core == nil || !s.Core.Enabled() {
-		status = "error"
-		msg = "CORE_URL не задан — тендеры некуда сохранять (каталог живёт в zakupki-core)."
+		writeJSON(w, http.StatusOK, map[string]any{
+			"run_id":         runID,
+			"searcher_id":    id,
+			"status":         "error",
+			"found_count":    0,
+			"message":        "CORE_URL не задан — тендеры некуда сохранять (каталог живёт в zakupki-core).",
+			"auto_ai":        p.AutoAI,
+			"config_version": p.ConfigVersion,
+		})
+		return
 	}
-	if s.EIS != nil && status != "error" {
-		hits, ferr := s.EIS.FetchFirstPages(r.Context(), p.Config, 3)
-		if ferr != nil {
-			log.Printf("eis fetch searcher=%s: %v", id, ferr)
-			status = "error"
-			msg = "Ошибка запроса к ЕИС: " + ferr.Error()
-		} else {
-			found = len(hits)
-			if len(hits) > 0 {
-				items := make([]coreclient.SyncItem, 0, len(hits))
-				for _, h := range hits {
-					items = append(items, coreclient.SyncItem{
-						RegNumber:  h.RegNumber,
-						SourceSite: "https://zakupki.gov.ru",
-						NoticeURL:  h.NoticeURL,
-						Law:        h.Law,
-						ObjectName: h.ObjectName,
-					})
-				}
-				if err := s.Core.SyncSearchConfig(r.Context(), p.ID, p.Name, p.ConfigVersion, items, true); err != nil {
-					log.Printf("core sync searcher=%s: %v", id, err)
-					status = "error"
-					msg = "ЕИС ок, но sync в core: " + err.Error()
-				}
-			} else {
-				msg = "В ЕИС по текущим фильтрам ничего не найдено (или парсер не увидел карточки)."
-			}
-		}
-	} else if s.EIS == nil && status != "error" {
-		status = "error"
-		msg = "EIS client не инициализирован."
+	if s.EIS == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"run_id":         runID,
+			"searcher_id":    id,
+			"status":         "error",
+			"found_count":    0,
+			"message":        "EIS client не инициализирован.",
+			"auto_ai":        p.AutoAI,
+			"config_version": p.ConfigVersion,
+		})
+		return
 	}
 
+	if existing, loaded := s.runs.LoadOrStore(id, runID); loaded {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"run_id":         existing,
+			"searcher_id":    id,
+			"status":         "running",
+			"found_count":    0,
+			"message":        "Обход уже идёт. Список в UI пополняется по мере страниц ЕИС (до 1000×50).",
+			"auto_ai":        p.AutoAI,
+			"config_version": p.ConfigVersion,
+		})
+		return
+	}
+
+	// Background crawl: UI polls tenders while each page is synced into core.
+	go s.crawlSearcher(p, runID)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"run_id":      runID,
-		"searcher_id": id,
-		"status":      status,
-		"found_count": found,
-		"message":     msg,
-		"auto_ai":     p.AutoAI,
+		"run_id":         runID,
+		"searcher_id":    id,
+		"status":         "running",
+		"found_count":    0,
+		"message":        "Обход ЕИС запущен: до 1000 страниц по 50 записей, пауза 1 с. Список будет пополняться.",
+		"auto_ai":        p.AutoAI,
 		"config_version": p.ConfigVersion,
 	})
+}
+
+func (s *Server) crawlSearcher(p models.SearchProfile, runID string) {
+	defer s.runs.Delete(p.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Hour)
+	defer cancel()
+
+	total, pages, err := s.EIS.FetchPages(ctx, p.Config, eissearch.DefaultMaxPages, func(page int, hits []eissearch.Hit) error {
+		if len(hits) == 0 {
+			return nil
+		}
+		items := make([]coreclient.SyncItem, 0, len(hits))
+		for _, h := range hits {
+			items = append(items, coreclient.SyncItem{
+				RegNumber:  h.RegNumber,
+				SourceSite: "https://zakupki.gov.ru",
+				NoticeURL:  h.NoticeURL,
+				Law:        h.Law,
+				ObjectName: h.ObjectName,
+			})
+		}
+		if err := s.Core.SyncSearchConfig(ctx, p.ID, p.Name, p.ConfigVersion, items, true); err != nil {
+			return err
+		}
+		log.Printf("eis crawl searcher=%s run=%s page=%d synced=%d", p.ID, runID, page, len(items))
+		return nil
+	})
+	if err != nil {
+		log.Printf("eis crawl searcher=%s run=%s done pages=%d found=%d err=%v", p.ID, runID, pages, total, err)
+		return
+	}
+	log.Printf("eis crawl searcher=%s run=%s done pages=%d found=%d", p.ID, runID, pages, total)
 }

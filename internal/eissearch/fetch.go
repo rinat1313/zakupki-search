@@ -52,8 +52,9 @@ type Options struct {
 }
 
 type Fetcher struct {
-	BaseURL string
-	HTTP    *http.Client
+	BaseURL   string
+	HTTP      *http.Client
+	PageDelay time.Duration // 0 → DefaultPageDelay (1s)
 }
 
 func New(baseURL string) *Fetcher {
@@ -68,11 +69,18 @@ func NewWithOptions(opt Options) *Fetcher {
 	client := opt.HTTPClient
 	if client == nil {
 		client = &http.Client{
-			Timeout:   45 * time.Second,
+			Timeout:   90 * time.Second,
 			Transport: newTransport(opt.CADir, opt.Insecure),
 		}
 	}
 	return &Fetcher{BaseURL: baseURL, HTTP: client}
+}
+
+func (f *Fetcher) pageDelay() time.Duration {
+	if f != nil && f.PageDelay > 0 {
+		return f.PageDelay
+	}
+	return DefaultPageDelay
 }
 
 func newTransport(caDir string, insecure bool) *http.Transport {
@@ -147,38 +155,96 @@ func uniqueDirs(caDir string) []string {
 	return out
 }
 
+const (
+	// DefaultMaxPages — потолок обхода выдачи ЕИС (или пока страницы не кончатся).
+	DefaultMaxPages = 1000
+	// DefaultPageDelay — пауза между страницами, чтобы не словить капчу/бан.
+	DefaultPageDelay = time.Second
+	pageSizeParam    = "_50"
+	pageFetchRetries = 3
+)
+
+// FetchFirstPages walks EIS result pages until empty or maxPages (capped at 1000).
+// Always requests 50 rows per page. Sleeps DefaultPageDelay between pages.
 func (f *Fetcher) FetchFirstPages(ctx context.Context, cfg models.SearcherConfig, maxPages int) ([]Hit, error) {
+	var out []Hit
+	_, _, err := f.FetchPages(ctx, cfg, maxPages, func(_ int, hits []Hit) error {
+		out = append(out, hits...)
+		return nil
+	})
+	return out, err
+}
+
+// FetchPages visits page 1..maxPages (default/cap 1000) or stops when a page
+// adds no new reg numbers. onPage is called with *new* hits of that page (may be empty at end).
+func (f *Fetcher) FetchPages(ctx context.Context, cfg models.SearcherConfig, maxPages int, onPage func(page int, newHits []Hit) error) (total, pages int, err error) {
 	if maxPages < 1 {
-		maxPages = 1
+		maxPages = DefaultMaxPages
 	}
-	if maxPages > 5 {
-		maxPages = 5
+	if maxPages > DefaultMaxPages {
+		maxPages = DefaultMaxPages
 	}
 	seen := map[string]bool{}
-	var out []Hit
 	for page := 1; page <= maxPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return total, pages, err
+		}
+		if page > 1 {
+			select {
+			case <-ctx.Done():
+				return total, pages, ctx.Err()
+			case <-time.After(f.pageDelay()):
+			}
+		}
 		q := cfg.QueryValues()
 		q.Set("pageNumber", fmt.Sprintf("%d", page))
+		q.Set("recordsPerPage", pageSizeParam)
 		u := f.BaseURL + models.EISResultsPath + "?" + q.Encode()
-		body, err := f.get(ctx, u)
-		if err != nil {
-			return out, err
+		body, gerr := f.getRetry(ctx, u)
+		if gerr != nil {
+			return total, pages, gerr
 		}
 		hits := parseHits(body, f.BaseURL)
-		added := 0
+		var fresh []Hit
 		for _, h := range hits {
 			if seen[h.RegNumber] {
 				continue
 			}
 			seen[h.RegNumber] = true
-			out = append(out, h)
-			added++
+			fresh = append(fresh, h)
 		}
-		if added == 0 {
+		pages = page
+		total += len(fresh)
+		if onPage != nil {
+			if err := onPage(page, fresh); err != nil {
+				return total, pages, err
+			}
+		}
+		if len(fresh) == 0 {
 			break
 		}
 	}
-	return out, nil
+	return total, pages, nil
+}
+
+func (f *Fetcher) getRetry(ctx context.Context, u string) (string, error) {
+	var last error
+	for i := 0; i < pageFetchRetries; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(f.pageDelay() * time.Duration(i+1)):
+			}
+			log.Printf("eissearch: retry %d GET %s", i+1, u)
+		}
+		body, err := f.get(ctx, u)
+		if err == nil {
+			return body, nil
+		}
+		last = err
+	}
+	return "", last
 }
 
 func (f *Fetcher) get(ctx context.Context, u string) (string, error) {

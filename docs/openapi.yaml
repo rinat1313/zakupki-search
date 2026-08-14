@@ -294,9 +294,11 @@ paths:
       tags: [searchers]
       summary: Запустить поиск ЕИС и sync в core
       description: |
-        Обходит выдачу ЕИС, пушит snapshot в
-        `POST /api/v1/categories/by-search-config/{id}/sync` (enqueue=true).
-        При `auto_ai=true` на поисковике core должен анализировать новые карточки.
+        Запускает фоновый обход выдачи ЕИС: до 1000 страниц по 50 записей,
+        пауза 1 с между страницами, пока выдача не кончится.
+        Каждая страница сразу sync в
+        `POST /api/v1/categories/by-search-config/{id}/sync` (enqueue=true),
+        поэтому список в UI пополняется. Ответ сразу `status=running`.
       operationId: runSearcher
       responses:
         "200":
